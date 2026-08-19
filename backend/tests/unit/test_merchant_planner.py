@@ -38,6 +38,7 @@ def test_plan_request_delegates_to_specialists(monkeypatch):
         query="How can I improve?",
         memory_context='["User prioritizes service"]',
         owner_context='{"city": "Hanoi", "merchant_id": "m1"}',
+        history_context="",
     )
 
 

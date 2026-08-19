@@ -7,17 +7,15 @@ from langfuse import get_client
 from models.merchant_execution import PlannerDecision, parse_planner_decision
 from services.mem0_service import MemoryHit
 from services.merchant_prompts import get_merchant_prompt
-
-
 def plan_request(
     query: str,
     memories: list[MemoryHit],
     owner_context: dict[str, Any],
     llm: Any,
     *,
+    history: list[dict[str, Any]] | None = None,
     label: str | None = None,
 ) -> PlannerDecision:
-    """Run single planner LLM call and return strictly validated PlannerDecision."""
     client = get_client()
     prompt = get_merchant_prompt("planner", label=label)
 
@@ -25,11 +23,14 @@ def plan_request(
     memory_context_str = json.dumps(memory_list, ensure_ascii=False)
     owner_context_str = json.dumps(owner_context, ensure_ascii=False, sort_keys=True)
 
-    compiled_prompt = prompt.compile(
-        query=query,
-        memory_context=memory_context_str,
-        owner_context=owner_context_str,
-    )
+    compile_kwargs = {
+        "query": query,
+        "memory_context": memory_context_str,
+        "owner_context": owner_context_str,
+        "history_context": (history if isinstance(history, str) else json.dumps(history, ensure_ascii=False)) if history else "",
+    }
+
+    compiled_prompt = prompt.compile(**compile_kwargs)
 
     with client.start_as_current_observation(
         name="planner",
@@ -38,6 +39,7 @@ def plan_request(
             "query": query,
             "memory_context": memory_list,
             "owner_context": owner_context,
+            "history_context": history or "",
         },
         model=getattr(llm, "model", None),
         prompt=prompt,

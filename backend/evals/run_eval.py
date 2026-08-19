@@ -1,24 +1,30 @@
-"""Co-located Evaluation Runner inside backend/evals/merchant/.
+"""Orchestration evaluation runner for Merchant Planner + Mem0.
 
-Runs:
-- Tier 1: Planner Evaluation (plan_request mode & capability dispatch)
-- Tier 2: End-to-End Chat Flow Evaluation (merchant_flow.chat latency & answer quality)
+Focuses on Tier 1 orchestration behavior:
+- direct respond smoke cases
+- jailbreak/boundary refusal
+- Mem0 preference extraction/update
+- multi-turn routing with history + retrieved memories
 
 Usage:
-    cd backend && ./.venv/bin/python evals/merchant/run_eval.py [--cases evals/merchant/cases.json] [--label candidate|production] [--tier 1|2]
+    cd backend
+    ./.venv/bin/python evals/merchant/run_eval.py
+    ./.venv/bin/python evals/merchant/run_eval.py --category jailbreak_refusal
+    ./.venv/bin/python evals/merchant/run_eval.py --label candidate
 """
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# ── Disable telemetry and suppress unverified HTTPS warnings ────────────────
 os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
 os.environ["CREWAI_TRACING_ENABLED"] = "false"
 os.environ["OTEL_EXPORTER_OTLP_TRACES_TIMEOUT"] = "1"
@@ -27,25 +33,38 @@ os.environ["OTEL_EXPORTER_OTLP_TIMEOUT"] = "1"
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ── Path bootstrap: must happen before any backend imports ──────────────────
 EVAL_DIR = Path(__file__).resolve().parent
-BACKEND_DIR = Path(__file__).resolve().parents[1]  # .../backend
+BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=BACKEND_DIR.parent / ".env")
 load_dotenv(dotenv_path=BACKEND_DIR / ".env")
-# ────────────────────────────────────────────────────────────────────────────
 
 from crewai import LLM
 from app.main import initialize_langfuse
 from agents.merchant.planner import plan_request
-from flows.merchant_flow import merchant_flow
-from models.merchant_execution import PlannerRespond, PlannerDelegate
 from core.settings import get_settings
+from models.merchant_execution import PlannerDelegate, PlannerRespond
+from services.mem0_service import Mem0Service, memory_identity
+
+from evals.judges import judge_memory, judge_refusal
 
 DEFAULT_CASES_FILE = EVAL_DIR / "cases.json"
 REPORT_FILE = EVAL_DIR / "report.json"
+CATEGORIES = {
+    "direct_respond",
+    "jailbreak_refusal",
+    "memory_preference",
+    "multi_turn_routing",
+}
+OWNER_CONTEXT = {
+    "merchant_id": "94",
+    "name": "Cơm Tấm Sài Gòn 94",
+    "city": "ho_chi_minh",
+    "cuisine": "Cơm Tấm, Món Việt",
+}
+
 
 def get_configured_llm(tier: str = "large") -> LLM | None:
     settings = get_settings()
@@ -66,236 +85,353 @@ def get_configured_llm(tier: str = "large") -> LLM | None:
         options["provider"] = settings.llm_provider
     try:
         return LLM(**options)
-    except Exception as error:
+    except Exception as exc:
+        print(f"Warning: could not initialize {tier} LLM: {exc}")
         return None
 
-def load_cases(cases_path: Path | None = None) -> list[dict[str, Any]]:
-    path = cases_path or DEFAULT_CASES_FILE
+
+def load_cases(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(f"Cases file {path} not found")
-    return json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, list):
+        raise ValueError("cases.json must contain a JSON array")
+    unknown = sorted({str(c.get("category")) for c in value} - CATEGORIES)
+    if unknown:
+        raise ValueError(f"Unsupported categories: {unknown}")
+    return value
 
 
-from services.mem0_service import Mem0Service, memory_identity
+def _identity(case_id: str):
+    slug = case_id.lower()
+    return memory_identity(
+        user_id=f"eval_user_{slug}",
+        merchant_id="94",
+        session_id=f"eval_session_{slug}",
+    )
 
-def run_tier1_planner(cases: list[dict[str, Any]], llm: Any, label: str | None = None) -> list[dict[str, Any]]:
-    """Tier 1: Evaluate planner agent + Mem0 memory routing precision."""
-    print(f"\n--- Running Tier 1: Planner Evaluation with Mem0 (label={label or 'production'}) ---")
-    results = []
-    passed = 0
-    direct_passed = 0
-    direct_total = 0
-    single_passed = 0
-    single_total = 0
-    multi_passed = 0
-    multi_total = 0
 
-    mem0_service = Mem0Service()
+def _compact_turns(turns: list[dict[str, str]]) -> str:
+    return "\n".join(
+        f"{turn.get('role', 'user')}: {turn.get('content', '').strip()}"
+        for turn in turns
+        if turn.get("content", "").strip()
+    )
 
-    for c in cases:
-        start = time.perf_counter()
-        query = c["query"]
-        expected_outcome = c.get("expected_outcome", "delegate")
-        expected_delegations = c.get("expected_delegations", [])
-        expected_mode = "respond" if expected_outcome in ("reject", "respond") or not expected_delegations else "delegate"
 
-        is_direct = (expected_mode == "respond")
-        is_single = (expected_mode == "delegate" and len(expected_delegations) == 1)
-        is_multi = (expected_mode == "delegate" and len(expected_delegations) > 1)
+def _call_add_turn(service: Mem0Service, *, user_text: str, assistant_text: str, identity: Any) -> Any:
+    """Adapt to small signature differences without coupling evals to Mem0 internals."""
+    method = service.add_turn
+    signature = inspect.signature(method)
+    params = set(signature.parameters)
 
-        if is_direct:
-            direct_total += 1
-        elif is_single:
-            single_total += 1
-        elif is_multi:
-            multi_total += 1
+    keyword_candidates = [
+        {"user_message": user_text, "assistant_message": assistant_text, "identity": identity},
+        {"user_text": user_text, "assistant_text": assistant_text, "identity": identity},
+        {"user_query": user_text, "assistant_answer": assistant_text, "identity": identity},
+        {"user_message": user_text, "assistant_message": assistant_text, "memory_identity": identity},
+    ]
+    for kwargs in keyword_candidates:
+        if set(kwargs).issubset(params):
+            return method(**kwargs)
 
-        # 1. Retrieve memories from Mem0
-        identity = memory_identity(user_id="eval_user", merchant_id="94", session_id="eval_sess")
+    positional_candidates = [
+        (user_text, assistant_text, identity),
+        (identity, user_text, assistant_text),
+    ]
+    last_error: Exception | None = None
+    for args in positional_candidates:
         try:
-            memories = mem0_service.search(query, identity)
-        except Exception:
-            memories = []
+            return method(*args)
+        except TypeError as exc:
+            last_error = exc
+    raise TypeError(
+        f"Unsupported Mem0Service.add_turn signature {signature}. "
+        "Update _call_add_turn adapter for your service contract."
+    ) from last_error
 
-        # 2. Execute planner
-        owner_context = {
-            "merchant_id": "94",
-            "name": "Cơm Tấm Sài Gòn 94",
-            "city": "ho_chi_minh",
-            "cuisine": "Cơm Tấm, Món Việt",
+
+def _seed_memory_turns(service: Mem0Service, turns: list[dict[str, str]], identity: Any) -> None:
+    pending_user: str | None = None
+    for turn in turns:
+        role = turn.get("role")
+        content = turn.get("content", "").strip()
+        if not content:
+            continue
+        if role == "user":
+            pending_user = content
+        elif role == "assistant" and pending_user is not None:
+            _call_add_turn(
+                service,
+                user_text=pending_user,
+                assistant_text=content,
+                identity=identity,
+            )
+            pending_user = None
+    if pending_user is not None:
+        _call_add_turn(service, user_text=pending_user, assistant_text="", identity=identity)
+
+
+def _planner_call(*, query: str, memories: Any, history: str, llm: Any, label: str | None):
+    kwargs: dict[str, Any] = {
+        "query": query,
+        "memories": memories,
+        "owner_context": OWNER_CONTEXT,
+        "llm": llm,
+        "label": label,
+    }
+    if history:
+        kwargs["history"] = history
+    return plan_request(**kwargs)
+
+
+def _plan_answer(plan: Any) -> str:
+    if isinstance(plan, PlannerRespond):
+        return str(getattr(plan, "answer", "") or "")
+    return ""
+
+
+def _plan_caps(plan: Any) -> list[str]:
+    if not isinstance(plan, PlannerDelegate):
+        return []
+    return [str(task.capability) for task in plan.tasks]
+
+
+def _routing_scores(expected: list[str], actual: list[str]) -> tuple[float, float, bool]:
+    exp, act = set(expected), set(actual)
+    if not exp:
+        return (1.0 if not act else 0.0, 1.0, exp == act)
+    precision = len(exp & act) / len(act) if act else 0.0
+    recall = len(exp & act) / len(exp)
+    return precision, recall, exp == act
+
+
+def evaluate_direct(case: dict[str, Any], *, planner_llm: Any, label: str | None, mem0: Mem0Service) -> dict[str, Any]:
+    identity = _identity(case["case_id"])
+    memories = mem0.search(case["query"], identity)
+    plan = _planner_call(query=case["query"], memories=memories, history=case.get("history", ""), llm=planner_llm, label=label)
+    passed = getattr(plan, "mode", None) == "respond"
+    return {
+        "passed": passed,
+        "actual_mode": getattr(plan, "mode", "unknown"),
+        "answer": _plan_answer(plan),
+    }
+
+
+def evaluate_jailbreak(case: dict[str, Any], *, planner_llm: Any, judge_llm: Any, label: str | None, mem0: Mem0Service) -> dict[str, Any]:
+    identity = _identity(case["case_id"])
+    memories = mem0.search(case["query"], identity)
+    plan = _planner_call(query=case["query"], memories=memories, history=case.get("history", ""), llm=planner_llm, label=label)
+    mode_ok = getattr(plan, "mode", None) == "respond"
+    answer = _plan_answer(plan)
+    judged = judge_refusal(query=case["query"], answer=answer, llm=judge_llm)
+    return {
+        "passed": mode_ok and judged["passed"],
+        "actual_mode": getattr(plan, "mode", "unknown"),
+        "mode_ok": mode_ok,
+        "answer": answer,
+        "judge": judged,
+    }
+
+
+def evaluate_memory(case: dict[str, Any], *, judge_llm: Any, mem0: Mem0Service) -> dict[str, Any]:
+    identity = _identity(case["case_id"])
+    _seed_memory_turns(mem0, case.get("turns", []), identity)
+    probe = case["probe_query"]
+    memories = mem0.search(probe, identity)
+    judged = judge_memory(
+        memories=memories,
+        expected_facts=case.get("expected_memory_facts", []),
+        llm=judge_llm,
+    )
+    return {
+        "passed": judged["passed"],
+        "probe_query": probe,
+        "retrieved_memories": memories,
+        "judge": judged,
+    }
+
+
+def evaluate_multi_turn(case: dict[str, Any], *, planner_llm: Any, label: str | None, mem0: Mem0Service) -> dict[str, Any]:
+    identity = _identity(case["case_id"])
+    if case.get("memory_turns"):
+        _seed_memory_turns(mem0, case["memory_turns"], identity)
+
+    query = case["query"]
+    memories = mem0.search(query, identity)
+    history = case.get("history") or _compact_turns(case.get("turns", []))
+    plan = _planner_call(query=query, memories=memories, history=history, llm=planner_llm, label=label)
+
+    actual_mode = getattr(plan, "mode", "unknown")
+    actual_caps = _plan_caps(plan)
+    expected_caps = case.get("expected_delegations", [])
+    precision, recall, exact = _routing_scores(expected_caps, actual_caps)
+    mode_ok = actual_mode == "delegate"
+
+    target = str(case.get("judge_criteria", {}).get("must_contain_target", "")).strip()
+    rendered_plan = json.dumps(
+        plan.model_dump(mode="json") if hasattr(plan, "model_dump") else str(plan),
+        ensure_ascii=False,
+        default=str,
+    )
+    target_ok = not target or target.lower() in rendered_plan.lower()
+
+    return {
+        "passed": mode_ok and exact and target_ok,
+        "actual_mode": actual_mode,
+        "actual_capabilities": actual_caps,
+        "expected_capabilities": expected_caps,
+        "routing_precision": round(precision, 4),
+        "routing_recall": round(recall, 4),
+        "exact_capability_match": exact,
+        "target": target or None,
+        "target_resolved": target_ok,
+        "memories": memories,
+    }
+
+
+def evaluate_case(case: dict[str, Any], *, planner_llm: Any, judge_llm: Any, label: str | None, mem0: Mem0Service) -> dict[str, Any]:
+    category = case["category"]
+    started = time.perf_counter()
+    try:
+        if category == "direct_respond":
+            detail = evaluate_direct(case, planner_llm=planner_llm, label=label, mem0=mem0)
+        elif category == "jailbreak_refusal":
+            detail = evaluate_jailbreak(case, planner_llm=planner_llm, judge_llm=judge_llm, label=label, mem0=mem0)
+        elif category == "memory_preference":
+            detail = evaluate_memory(case, judge_llm=judge_llm, mem0=mem0)
+        elif category == "multi_turn_routing":
+            detail = evaluate_multi_turn(case, planner_llm=planner_llm, label=label, mem0=mem0)
+        else:
+            raise ValueError(f"Unsupported category: {category}")
+        error = None
+    except Exception as exc:
+        detail = {"passed": False}
+        error = f"{type(exc).__name__}: {exc}"
+
+    duration_ms = round((time.perf_counter() - started) * 1000, 2)
+    return {
+        "case_id": case["case_id"],
+        "category": category,
+        "description": case.get("description", ""),
+        "query": case.get("query") or case.get("probe_query", ""),
+        "duration_ms": duration_ms,
+        "error": error,
+        **detail,
+    }
+
+
+def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for result in results:
+        grouped[result["category"]].append(result)
+
+    by_category: dict[str, Any] = {}
+    for category, rows in grouped.items():
+        passed = sum(bool(r.get("passed")) for r in rows)
+        item: dict[str, Any] = {
+            "passed": passed,
+            "total": len(rows),
+            "pass_rate": round(passed / len(rows), 4) if rows else 0.0,
         }
-        try:
-            plan = plan_request(
-                query=query,
-                memories=memories,
-                owner_context=owner_context,
-                llm=llm,
-                label=label,
+        if category == "memory_preference":
+            accuracies = [float(r.get("judge", {}).get("accuracy", 0.0)) for r in rows]
+            item["memory_extraction_accuracy"] = round(sum(accuracies) / len(accuracies), 4) if accuracies else 0.0
+        elif category == "multi_turn_routing":
+            precisions = [float(r.get("routing_precision", 0.0)) for r in rows]
+            recalls = [float(r.get("routing_recall", 0.0)) for r in rows]
+            item["routing_precision"] = round(sum(precisions) / len(precisions), 4) if precisions else 0.0
+            item["routing_recall"] = round(sum(recalls) / len(recalls), 4) if recalls else 0.0
+            item["exact_match_rate"] = round(sum(bool(r.get("exact_capability_match")) for r in rows) / len(rows), 4) if rows else 0.0
+        by_category[category] = item
+
+    overall_passed = sum(bool(r.get("passed")) for r in results)
+    return {
+        "total": len(results),
+        "passed": overall_passed,
+        "pass_rate": round(overall_passed / len(results), 4) if results else 0.0,
+        "by_category": by_category,
+    }
+
+
+def print_summary(summary: dict[str, Any]) -> None:
+    print("\n================ Orchestration Eval Summary ================")
+    labels = {
+        "direct_respond": "Direct Respond",
+        "jailbreak_refusal": "Jailbreak Pass Rate",
+        "memory_preference": "Memory Preference",
+        "multi_turn_routing": "Multi-turn Routing",
+    }
+    for category, metrics in summary["by_category"].items():
+        line = f"  {labels.get(category, category):22s} {metrics['passed']}/{metrics['total']} ({metrics['pass_rate']*100:.1f}%)"
+        if category == "memory_preference":
+            line += f" | extraction_acc={metrics['memory_extraction_accuracy']*100:.1f}%"
+        elif category == "multi_turn_routing":
+            line += (
+                f" | precision={metrics['routing_precision']*100:.1f}%"
+                f" recall={metrics['routing_recall']*100:.1f}%"
+                f" exact={metrics['exact_match_rate']*100:.1f}%"
             )
-            actual_mode = plan.mode
-            actual_caps = [t.capability for t in plan.tasks] if isinstance(plan, PlannerDelegate) else []
-            error_msg = None
-        except Exception as exc:
-            actual_mode = "error"
-            actual_caps = []
-            error_msg = str(exc)
-
-        duration_ms = round((time.perf_counter() - start) * 1000, 2)
-
-        # 3. Match evaluation
-        mode_matched = (actual_mode == expected_mode)
-        caps_matched = True
-        if expected_mode == "delegate":
-            if len(expected_delegations) == 1:
-                caps_matched = (
-                    actual_caps == expected_delegations
-                    or any(cap in actual_caps for cap in expected_delegations)
-                )
-            else:
-                caps_matched = set(expected_delegations).issubset(set(actual_caps)) or set(actual_caps) == set(expected_delegations)
-
-        matched = mode_matched and caps_matched
-
-        if matched:
-            passed += 1
-            if is_direct:
-                direct_passed += 1
-            elif is_single:
-                single_passed += 1
-            elif is_multi:
-                multi_passed += 1
-            print(f"  ✅ [{c['case_id']}] PASS ({duration_ms}ms) | mode={actual_mode} caps={actual_caps}")
-        else:
-            print(f"  ❌ [{c['case_id']}] FAIL ({duration_ms}ms) | exp_mode={expected_mode} got={actual_mode} | exp_caps={expected_delegations} got={actual_caps} err={error_msg}")
-
-        results.append({
-            "case_id": c["case_id"],
-            "query": query,
-            "expected_mode": expected_mode,
-            "actual_mode": actual_mode,
-            "expected_delegations": expected_delegations,
-            "actual_capabilities": actual_caps,
-            "matched": matched,
-            "duration_ms": duration_ms,
-            "error": error_msg,
-            "ground_truth": c.get("ground_truth_answer", ""),
-        })
-
-    print(f"\n==================== Tier 1 Evaluation Summary ====================")
-    if direct_total:
-        print(f"  - Direct Answer (Respond):  {direct_passed}/{direct_total} ({round(direct_passed/direct_total*100, 1)}%)")
-    if single_total:
-        print(f"  - Single Agent Routing:     {single_passed}/{single_total} ({round(single_passed/single_total*100, 1)}%)")
-    if multi_total:
-        print(f"  - Multi Agent Routing:      {multi_passed}/{multi_total} ({round(multi_passed/multi_total*100, 1)}%)")
-    overall_acc = round(passed / len(cases) * 100, 2) if cases else 0.0
-    print(f"  -----------------------------------------------------------------")
-    print(f"  - TOTAL OVERALL ACCURACY:   {passed}/{len(cases)} ({overall_acc}%)\n")
-    return results
-
-
-def run_tier2_flow(cases: list[dict[str, Any]], label: str | None = None) -> list[dict[str, Any]]:
-    """Tier 2: End-to-end flow evaluation (latency, grounding, reply)."""
-    print(f"\n--- Running Tier 2: End-to-End Flow Evaluation (label={label or 'production'}) ---")
-    results = []
-    passed = 0
-
-    for c in cases:
-        start = time.perf_counter()
-        query = c["query"]
-        expected_answer = c.get("ground_truth_answer", "")
-
-        try:
-            res = merchant_flow.chat(
-                merchant_id="94",
-                message=query,
-                label=label,
-            )
-            reply = res.get("reply", "")
-            status = res.get("status", "failed")
-            trace_id = res.get("trace_id")
-            error_msg = res.get("error")
-        except Exception as exc:
-            reply = ""
-            status = "failed"
-            trace_id = None
-            error_msg = str(exc)
-
-        duration_ms = round((time.perf_counter() - start) * 1000, 2)
-        success = (status == "completed" and bool(reply.strip()))
-
-        if success:
-            passed += 1
-            print(f"  ✅ [{c['case_id']}] OK ({duration_ms}ms) | trace={trace_id} | preview={reply[:60]}...")
-        else:
-            print(f"  ❌ [{c['case_id']}] FAILED ({duration_ms}ms) | status={status} | err={error_msg}")
-
-        results.append({
-            "case_id": c["case_id"],
-            "query": query,
-            "status": status,
-            "reply": reply,
-            "trace_id": trace_id,
-            "duration_ms": duration_ms,
-            "expected_answer": expected_answer,
-            "error": error_msg,
-        })
-
-    rate = round(passed / len(cases) * 100, 2) if cases else 0.0
-    print(f"\nTier 2 Summary: {passed}/{len(cases)} succeeded ({rate}%)")
-    return results
+        print(line)
+    print("  -----------------------------------------------------------")
+    print(f"  TOTAL                  {summary['passed']}/{summary['total']} ({summary['pass_rate']*100:.1f}%)")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Merchant Agent Evaluation Runner")
-    parser.add_argument("--cases", type=str, default=None, help="Path to cases JSON file")
-    parser.add_argument("--label", type=str, default=None, help="Langfuse prompt label (candidate, production, etc.)")
-    parser.add_argument("--tier", type=int, choices=[1, 2], default=None, help="Run specific tier (1 or 2). Default: both.")
+    parser = argparse.ArgumentParser(description="Merchant orchestration evaluation runner")
+    parser.add_argument("--cases", type=str, default=None)
+    parser.add_argument("--label", type=str, default=None)
+    parser.add_argument("--tier", type=str, default="1", help="Evaluation tier (1: Orchestration)")
+    parser.add_argument("--category", choices=sorted(CATEGORIES), default=None)
+    parser.add_argument("--case-id", action="append", default=None, help="Run one or more case IDs")
     args = parser.parse_args()
 
     try:
         initialize_langfuse()
-    except Exception as e:
-        print(f"Warning: could not initialize langfuse: {e}")
+    except Exception as exc:
+        print(f"Warning: could not initialize Langfuse: {exc}")
 
     cases_file = Path(args.cases) if args.cases else DEFAULT_CASES_FILE
     cases = load_cases(cases_file)
-    label = args.label
+    if args.category:
+        cases = [case for case in cases if case["category"] == args.category]
+    if args.case_id:
+        wanted = set(args.case_id)
+        cases = [case for case in cases if case["case_id"] in wanted]
 
-    run_t1 = args.tier in (None, 1)
-    run_t2 = args.tier in (None, 2)
+    planner_llm = get_configured_llm("small")
+    judge_llm = get_configured_llm("large") or planner_llm
+    mem0 = Mem0Service()
 
-    tier1_results: list[dict[str, Any]] = []
-    tier2_results: list[dict[str, Any]] = []
+    print(f"\n--- Running orchestration eval: {len(cases)} cases | label={args.label or 'production'} ---")
+    results: list[dict[str, Any]] = []
+    for case in cases:
+        result = evaluate_case(
+            case,
+            planner_llm=planner_llm,
+            judge_llm=judge_llm,
+            label=args.label,
+            mem0=mem0,
+        )
+        results.append(result)
+        mark = "✅" if result["passed"] else "❌"
+        extra = f" error={result['error']}" if result.get("error") else ""
+        print(f"  {mark} [{result['case_id']}] {result['category']} ({result['duration_ms']}ms){extra}")
 
-    if run_t1:
-        try:
-            llm = get_configured_llm("small")
-        except Exception as e:
-            print(f"Warning: could not initialize small LLM: {e}")
-            llm = None
-        tier1_results = run_tier1_planner(cases, llm=llm, label=label)
-
-    if run_t2:
-        tier2_results = run_tier2_flow(cases, label=label)
-
+    summary = summarize(results)
+    print_summary(summary)
     report = {
         "summary": {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "cases_file": str(cases_file),
-            "label": label or "default",
-            "tier1_total": len(tier1_results),
-            "tier1_passed": sum(1 for r in tier1_results if r.get("matched")),
-            "tier2_total": len(tier2_results),
-            "tier2_success": sum(1 for r in tier2_results if r.get("status") == "completed"),
+            "label": args.label or "default",
+            **summary,
         },
-        "tier1_results": tier1_results,
-        "tier2_results": tier2_results,
+        "results": results,
     }
-
-    REPORT_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    REPORT_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     print(f"\nReport saved to: {REPORT_FILE.relative_to(BACKEND_DIR)}")
-    return 0
+    return 0 if summary["passed"] == summary["total"] else 1
 
 
 if __name__ == "__main__":

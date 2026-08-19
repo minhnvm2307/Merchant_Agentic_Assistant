@@ -69,22 +69,14 @@ def test_compact_session_memory(db_session):
             f"Agent long response {i} " + ("x" * 500),
         )
 
-    # get_compact_history with max_turns=3 should return last 6 messages (3 turns)
+    # get_compact_history with max_turns=3 should return last 6 messages as plain text
     compact_history = session_svc.get_compact_history("sess_compact_01", max_turns=3)
-    assert len(compact_history) == 6
-
-    # LLM-compatible history uses the standard assistant role. Responses retain
-    # up to 450 chars so follow-up rewrite keeps relevant merchant facts.
-    assistant_msgs = [m for m in compact_history if m["role"] == "assistant"]
-    assert len(assistant_msgs) == 3
-    for msg in assistant_msgs:
-        assert len(msg["text"]) <= 453
-        assert msg["text"].endswith("...")
-
-    # User messages should remain intact
-    user_msgs = [m for m in compact_history if m["role"] == "user"]
-    assert len(user_msgs) == 3
-    assert user_msgs[0]["text"] == "User question 2"
+    lines = compact_history.split("\n")
+    assert len(lines) == 6
+    assert lines[0].startswith("user: User question 2")
+    assert lines[1].startswith("assistant: Agent long response 2")
+    assert lines[1].endswith("...")
+    assert len(lines[1]) <= len("assistant: ") + 453
 
 
 def test_replacing_session_snapshot_removes_stale_keys(db_session):

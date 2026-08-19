@@ -24,6 +24,7 @@ def test_merchant_prompts_release_definitions():
         "merchant/specialist-review",
         "merchant/specialist-cohort",
         "merchant/synthesis",
+        "merchant/memory-extraction",
     }
     assert set(mod.PROMPTS.keys()) == expected_prompts
 
@@ -34,7 +35,7 @@ def test_push_prompts_creates_all_with_candidate_label(monkeypatch):
     monkeypatch.setattr(mod, "get_langfuse_client", lambda: mock_client)
 
     mod.push_prompts(label="candidate")
-    assert mock_client.create_prompt.call_count == 7
+    assert mock_client.create_prompt.call_count == 8
     mock_client.flush.assert_called_once()
 
 
@@ -48,5 +49,5 @@ def test_promote_production_updates_labels(monkeypatch):
     monkeypatch.setattr(mod, "get_langfuse_client", lambda: mock_client)
 
     mod.promote_production(source_label="candidate")
-    assert mock_client.update_prompt.call_count == 7
+    assert mock_client.update_prompt.call_count == 8
     mock_client.flush.assert_called_once()

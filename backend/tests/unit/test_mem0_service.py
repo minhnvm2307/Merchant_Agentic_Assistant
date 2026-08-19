@@ -62,8 +62,13 @@ def test_search_sends_current_query_and_cross_session_filters_only():
     assert hits == [MemoryHit(memory="User values fast service", score=0.91)]
 
 
-def test_add_turn_sends_run_id_and_messages():
+def test_add_turn_sends_run_id_and_messages(monkeypatch):
     seen = {}
+    from unittest.mock import MagicMock
+
+    mock_prompt = MagicMock()
+    mock_prompt.prompt = "Extract COMPETITOR information"
+    monkeypatch.setattr("services.mem0_service.get_merchant_prompt", lambda *args, **kwargs: mock_prompt)
 
     def handler(request: httpx.Request) -> httpx.Response:
         import json
@@ -83,7 +88,9 @@ def test_add_turn_sends_run_id_and_messages():
         "user_id": "u",
         "agent_id": "merchant-advisor:m",
         "run_id": "session-123",
+        "prompt": seen["body"].get("prompt"),
     }
+    assert "COMPETITOR" in seen["body"]["prompt"]
 
 
 def test_empty_search_result_returns_empty_list():

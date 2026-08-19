@@ -53,6 +53,11 @@ restart:
 	docker compose up -d --force-recreate mem0
 	@echo "==> Mem0 container restarted with latest .env configuration!"
 
+prompt-update:
+	@echo "==>Push new version of agent system prompt to LangFuse ==="
+	cd backend && .venv/bin/python ../scripts/langfuse/push_merchant_prompts.py && .venv/bin/python ../scripts/langfuse/push_merchant_prompts.py --promote-production
+	@echo "==>Push new version of agent system prompt to LangFuse completed!!!"
+
 dev-backend:
 	@echo "==> Starting FastAPI Backend at http://localhost:8000..."
 	@cd backend && LANGFUSE_INSECURE_SSL=true .venv/bin/uvicorn app.main:app --port 8000 --reload

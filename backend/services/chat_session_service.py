@@ -114,24 +114,21 @@ class ChatSessionService:
             for m in self._recent_messages(session_id, limit)
         ]
 
-    def get_compact_history(self, session_id: str, max_turns: int = 3) -> list[dict[str, Any]]:
-        """Fetch compact history (last max_turns turns = 2 * max_turns messages).
+    def get_compact_history(self, session_id: str, max_turns: int = 3) -> str:
+        """Fetch compact history as plain text (last max_turns turns).
 
         Agent responses preserve key facts (up to 450 characters) to retain context
         like merchant names, ratings, and recommendations for multi-turn queries.
         """
         limit = max_turns * 2
-        compact_list = []
+        lines: list[str] = []
         for m in self._recent_messages(session_id, limit):
-            text = m.text
+            text = (m.text or "").strip()
             role = "assistant" if m.sender in ("agent", "assistant") else "user"
             if role == "assistant" and len(text) > 450:
                 text = text[:450] + "..."
-            compact_list.append({
-                "role": role,
-                "text": text,
-            })
-        return compact_list
+            lines.append(f"{role}: {text}")
+        return "\n".join(lines)
 
     def _recent_messages(self, session_id: str, limit: int) -> list[ChatMessage]:
         rows = self._db.execute(

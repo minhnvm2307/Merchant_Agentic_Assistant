@@ -149,11 +149,13 @@ class MerchantFlowDispatcher:
 
             # 3. Load owner context & plan request
             owner_context = self._load_owner_context(session, merchant_id)
+            history = session_svc.get_compact_history(actual_session_id, max_turns=3)
             planner_llm = self._get_llm()
             decision = self.planner(
                 query=message,
                 memories=memories,
                 owner_context=owner_context,
+                history=history,
                 llm=planner_llm,
                 label=label,
             )

@@ -6,7 +6,7 @@ import httpx
 
 from core.errors import ProviderError, TimeoutError
 from core.settings import get_settings
-
+from services.merchant_prompts import get_merchant_prompt
 
 @dataclass(frozen=True)
 class MemoryIdentity:
@@ -106,8 +106,11 @@ class Mem0Service:
         user_text: str,
         assistant_text: str,
         identity: MemoryIdentity,
-    ) -> None:
+        label: str | None = None,
+    ) -> dict:
         """Add user/assistant interaction turn to Mem0 in a structured format."""
+        prompt_obj = get_merchant_prompt("memory_extraction", label=label)
+        extraction_prompt = prompt_obj.prompt.strip() if hasattr(prompt_obj, "prompt") else str(prompt_obj).strip()
         payload = {
             "messages": [
                 {"role": "user", "content": user_text},
@@ -116,6 +119,7 @@ class Mem0Service:
             "user_id": identity.user_id,
             "agent_id": identity.agent_id,
             "run_id": identity.run_id,
+            "prompt": extraction_prompt,
         }
         client = self._get_client()
         headers = {}

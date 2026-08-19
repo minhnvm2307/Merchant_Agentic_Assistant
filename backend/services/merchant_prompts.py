@@ -14,6 +14,7 @@ PROMPT_NAMES: dict[str, str] = {
     "review": "merchant/specialist-review",
     "cohort": "merchant/specialist-cohort",
     "synthesis": "merchant/synthesis",
+    "memory_extraction": "merchant/memory-extraction",
 }
 
 
