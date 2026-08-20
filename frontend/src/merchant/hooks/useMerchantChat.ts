@@ -70,6 +70,7 @@ export function useMerchantChat(merchantId = '94') {
           content: String(message.text ?? ''),
           timestamp: message.timestamp ? new Date(String(message.timestamp)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : time(),
           traceId: typeof message.trace_id === 'string' ? message.trace_id : undefined,
+          analyzedMerchants: (message.merchants ?? message.analyzedMerchants ?? []) as AnalyzedMerchant[],
         }));
         setMessages((current) => current.length > 0 ? current : history);
         history.filter((message) => message.sender === 'assistant' && message.traceId)

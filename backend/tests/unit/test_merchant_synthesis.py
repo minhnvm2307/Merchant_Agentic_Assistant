@@ -31,7 +31,7 @@ def test_synthesis_combines_successful_and_failed_capabilities(monkeypatch):
     ]
 
     answer = synthesize_results("How is my store doing under current policy?", results, mock_llm)
-    assert answer == "Combined synthesized answer"
+    assert answer.content == "Combined synthesized answer"
     mock_llm.call.assert_called_once_with("compiled synthesis prompt")
     mock_prompt.compile.assert_called_once()
     compiled_kwargs = mock_prompt.compile.call_args.kwargs

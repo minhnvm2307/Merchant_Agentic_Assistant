@@ -41,6 +41,15 @@ PlannerDecision = Annotated[PlannerRespond | PlannerDelegate, Field(discriminato
 _DECISION_ADAPTER = TypeAdapter(PlannerDecision)
 
 
+class AdvisorResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(min_length=1, max_length=10000, description="Nội dung phản hồi tư vấn cho chủ quán (Markdown).")
+    mentioned_merchant_refs: list[str] = Field(
+        default_factory=list,
+        description="Danh sách mã merchant_ref (VD: ['pub_01', 'pub_02']) của các quán đối thủ thực sự được đề cập/phân tích trong câu trả lời.",
+    )
+
+
 def parse_planner_decision(raw: str) -> PlannerDecision:
     """Strictly validate and parse raw JSON string into PlannerDecision using Pydantic."""
     text = raw.strip()

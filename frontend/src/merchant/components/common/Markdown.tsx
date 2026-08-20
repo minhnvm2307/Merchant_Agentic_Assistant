@@ -12,6 +12,16 @@ export function Markdown({ children }: { children: string }) {
               <table {...props}>{children}</table>
             </div>
           ),
+          a: ({ children, href, ...props }) => (
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              {...props}
+            >
+              {children}
+            </a>
+          ),
         }}
       >
         {children}

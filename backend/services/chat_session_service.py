@@ -110,6 +110,7 @@ class ChatSessionService:
                 "text": m.text,
                 "trace_id": m.trace_id,
                 "timestamp": str(m.timestamp),
+                "merchants": (m.structured_payload_json or {}).get("merchants", []),
             }
             for m in self._recent_messages(session_id, limit)
         ]

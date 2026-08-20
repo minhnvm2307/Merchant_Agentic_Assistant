@@ -21,7 +21,7 @@ from core.logging import get_logger
 from core.settings import get_settings
 from database.connection import SessionLocal
 from database.models import Merchant
-from models.merchant_agentic import AgenticRunContext
+from models.merchant_agentic import AgenticRunContext, normalize_text
 from models.merchant_execution import PlannerDelegate, PlannerRespond
 from services.chat_session_service import ChatSessionService
 from services.mem0_service import Mem0Service, Mem0WriteDispatcher, memory_identity
@@ -43,6 +43,44 @@ def _require_trace_id(value: str | None) -> str:
     if value is None or re.fullmatch(r"[0-9a-f]{32}", value) is None:
         raise RuntimeError("merchant flow requires an active Langfuse trace")
     return value
+
+
+def _filter_mentioned_merchants(
+    all_merchants: list[dict[str, Any]],
+    reply_text: str,
+) -> list[dict[str, Any]]:
+    """Filter public merchants to only those actually referenced in the response text."""
+    if not all_merchants:
+        return []
+    if not reply_text:
+        return all_merchants[:5]
+
+    reply_lower = normalize_text(reply_text)
+    mentioned: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    for m in all_merchants:
+        m_id = str(m.get("merchant_id", ""))
+        if m_id in seen_ids:
+            continue
+
+        raw_name = str(m.get("name", "")).strip()
+        ref = str(m.get("merchant_ref", "")).strip().lower()
+
+        norm_name = normalize_text(raw_name)
+        main_name = normalize_text(raw_name.split("-")[0].strip())
+
+        is_name_match = (
+            bool(norm_name and len(norm_name) >= 3 and norm_name in reply_lower)
+            or bool(main_name and len(main_name) >= 3 and main_name in reply_lower)
+        )
+        is_ref_match = bool(ref and ref in reply_text.lower())
+
+        if is_name_match or is_ref_match:
+            mentioned.append(m)
+            seen_ids.add(m_id)
+
+    return mentioned if mentioned else all_merchants[:5]
 
 
 class MerchantFlowDispatcher:
@@ -163,6 +201,7 @@ class MerchantFlowDispatcher:
             execution_mode = "respond"
             capabilities_run: list[str] = []
             public_merchants: list[dict[str, Any]] = []
+            mentioned_refs: list[str] = []
             reply = ""
 
             trace_ctx = {"trace_id": origin_trace_id} if origin_trace_id else None
@@ -217,7 +256,27 @@ class MerchantFlowDispatcher:
                     )
                     for r in results:
                         public_merchants.extend(r.public_merchants)
-                    reply = self.synthesize(query=message, results=results, llm=planner_llm, label=label)
+                    synth_out = self.synthesize(query=message, results=results, llm=planner_llm, label=label)
+                    if hasattr(synth_out, "content"):
+                        reply = synth_out.content
+                        mentioned_refs = getattr(synth_out, "mentioned_merchant_refs", [])
+                    elif isinstance(synth_out, dict):
+                        reply = synth_out.get("content", str(synth_out))
+                        mentioned_refs = synth_out.get("mentioned_merchant_refs", [])
+                    else:
+                        reply = str(synth_out)
+                        mentioned_refs = []
+
+            # Filter public merchants to only those actually discussed in the response
+            if mentioned_refs:
+                filtered_merchants = [
+                    m for m in public_merchants
+                    if m.get("merchant_ref") in mentioned_refs or str(m.get("merchant_id")) in mentioned_refs
+                ]
+                if not filtered_merchants:
+                    filtered_merchants = _filter_mentioned_merchants(public_merchants, reply)
+            else:
+                filtered_merchants = _filter_mentioned_merchants(public_merchants, reply)
 
             # 5. Persist assistant message
             session_svc.append_message(
@@ -225,6 +284,7 @@ class MerchantFlowDispatcher:
                 sender="agent",
                 text=reply,
                 trace_id=origin_trace_id,
+                structured_payload={"merchants": filtered_merchants},
             )
 
             # 6. Background write to Mem0
@@ -253,7 +313,7 @@ class MerchantFlowDispatcher:
                 "session_id": actual_session_id,
                 "trace_id": origin_trace_id,
                 "execution_mode": execution_mode,
-                "public_merchants": public_merchants,
+                "public_merchants": filtered_merchants,
                 "created_at": _utc_now_iso(),
             }
         finally:

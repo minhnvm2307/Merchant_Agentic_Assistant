@@ -49,7 +49,7 @@ from tools.merchant.cohort_tool import (
     compare_owner_to_public_cohort,
 )
 from tools.merchant.diagnosis_tool import diagnose_merchant, recommend_improvements
-from tools.merchant.search_tool import SearchMerchantsInput, search_merchants
+from tools.merchant.search_tool import SearchMerchantsInput, project_merchants_for_llm, search_merchants
 from tools.merchant.public_detail_tool import get_public_merchant_detail
 
 
@@ -622,7 +622,8 @@ class RunScopedMerchantToolGateway:
             result=result,
             duration_ms=round((time.perf_counter() - started) * 1000, 3),
         )
-        return json.dumps(result, ensure_ascii=False)
+        llm_payload = project_merchants_for_llm(result, max_items=5)
+        return json.dumps(llm_payload, ensure_ascii=False)
 
     def run_public_detail(self, **raw_args: Any) -> str:
         args = PublicMerchantDetailInput.model_validate(raw_args).model_dump()

@@ -14,7 +14,7 @@ const SUGGESTIONS: SuggestionItem[] = [
     icon: '📍',
     category: 'Cạnh tranh & Địa điểm',
     title: 'Tìm đối thủ khu vực xung quanh',
-    prompt: 'Những quán poke bowl ngon gần tôi ở Quận 1?',
+    prompt: 'Tìm những quán bàn cùng mặt hàng với tôi gần đây.',
   },
   {
     icon: '📊',
@@ -23,10 +23,10 @@ const SUGGESTIONS: SuggestionItem[] = [
     prompt: 'Đánh giá hiệu suất và chất lượng quán của tôi',
   },
   {
-    icon: '🔍',
-    category: 'Bán kính Cạnh tranh',
-    title: 'Quét đối thủ bán kính 5 km',
-    prompt: 'Tìm các đối thủ cạnh tranh trong bán kính 5 km',
+    icon: '🗎',
+    category: 'Chính sách XanhSM',
+    title: 'Các chính sách về đăng ký merchant',
+    prompt: 'Các bước để đăng ký merchant trên XanhSM?',
   },
   {
     icon: '💬',
@@ -60,7 +60,7 @@ export function MessageList({
             <span>MERCHANT AI ASSISTANT</span>
           </div>
 
-          <h2 className="hero-headline">Hôm nay bạn muốn phân tích điều gì?</h2>
+          <h2 className="hero-headline">Hôm nay bạn cần giúp điều gì?</h2>
           <p className="hero-description">
             Đặt câu hỏi để phân tích đối thủ cạnh tranh, tìm kiếm vị trí địa lý, xem tổng hợp review và nhận gợi ý chiến lược tăng trưởng.
           </p>

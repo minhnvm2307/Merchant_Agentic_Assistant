@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: help install up down clean log logs health restart dev-backend dev-frontend eval
+.PHONY: help install up down clean log logs health restart mem0-clear mem0-reset dev-backend dev-frontend eval
 
 help:
 	@echo "Available commands:"
@@ -11,6 +11,7 @@ help:
 	@echo "  make log / logs    - Stream live logs from all Docker containers"
 	@echo "  make health        - Check health status of Docker containers, Mem0 & Backend"
 	@echo "  make restart       - Recreate and restart Mem0 container (apply .env LLM changes)"
+	@echo "  make mem0-clear    - Clear all Mem0 stored memories"
 	@echo "  make dev-backend   - Run local FastAPI backend dev server"
 	@echo "  make dev-frontend  - Run local Vite frontend dev server"
 	@echo "  make eval          - Run Tier 1 Planner & Routing evaluation"
@@ -57,6 +58,10 @@ prompt-update:
 	@echo "==>Push new version of agent system prompt to LangFuse ==="
 	cd backend && .venv/bin/python ../scripts/langfuse/push_merchant_prompts.py && .venv/bin/python ../scripts/langfuse/push_merchant_prompts.py --promote-production
 	@echo "==>Push new version of agent system prompt to LangFuse completed!!!"
+
+mem0-clear mem0-reset:
+	@echo "==> Clearing Mem0 memories..."
+	@cd backend && .venv/bin/python ../scripts/clear_mem0.py
 
 dev-backend:
 	@echo "==> Starting FastAPI Backend at http://localhost:8000..."

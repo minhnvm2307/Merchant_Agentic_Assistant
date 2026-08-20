@@ -511,3 +511,69 @@ class SearchMerchantsInput(BaseModel):
     @classmethod
     def normalize_anchor_merchant_id(cls, value: Any) -> Any:
         return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+
+
+def project_merchant_for_llm(merchant: dict[str, Any]) -> dict[str, Any]:
+    """Compact merchant representation optimized for LLM token efficiency."""
+    category = merchant.get("cuisine") or merchant.get("category") or "Quán ăn"
+    price_min = merchant.get("menu_price_min")
+    price_max = merchant.get("menu_price_max")
+    price_med = merchant.get("menu_price_median")
+
+    price_str = None
+    if price_min is not None and price_max is not None:
+        if price_min == price_max:
+            price_str = f"{price_min:,} VND"
+        else:
+            price_str = f"{price_min:,} - {price_max:,} VND"
+        if price_med is not None:
+            price_str += f" (TB: {price_med:,} VND)"
+    elif merchant.get("price_level"):
+        price_str = str(merchant.get("price_level"))
+
+    ratings = merchant.get("ratings") or {}
+    rating_val = merchant.get("rating")
+    if rating_val is None:
+        if isinstance(ratings, dict):
+            rating_val = ratings.get("shopeefood") or ratings.get("foody")
+
+    item: dict[str, Any] = {
+        "merchant_ref": merchant.get("merchant_ref"),
+        "name": merchant.get("name"),
+        "category": category,
+        "address": merchant.get("address"),
+    }
+    if merchant.get("city"):
+        item["city"] = merchant.get("city")
+    if price_str:
+        item["price_range"] = price_str
+    if rating_val is not None:
+        item["rating"] = round(float(rating_val), 1)
+    if merchant.get("distance_km") is not None:
+        item["distance_km"] = merchant.get("distance_km")
+
+    tags = merchant.get("tags")
+    if isinstance(tags, dict):
+        clean_tags = {}
+        for k, v in tags.items():
+            if v and isinstance(v, list):
+                clean_tags[k] = v
+        if clean_tags:
+            item["tags"] = clean_tags
+
+    return item
+
+
+def project_merchants_for_llm(result: dict[str, Any], max_items: int = 5) -> dict[str, Any]:
+    """Project a full search_merchants result payload into a compact view for LLMs."""
+    merchants = result.get("merchants", [])[:max_items]
+    compact = [project_merchant_for_llm(m) for m in merchants]
+    output: dict[str, Any] = {
+        "status": result.get("status", "ok"),
+        "count": len(compact),
+        "merchants": compact,
+    }
+    if result.get("cohort_ref"):
+        output["cohort_ref"] = result["cohort_ref"]
+    return output
+

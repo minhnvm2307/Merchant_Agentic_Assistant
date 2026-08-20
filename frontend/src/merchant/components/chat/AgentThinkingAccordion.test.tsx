@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AgentThinkingAccordion } from './AgentThinkingAccordion';
 
@@ -16,6 +16,8 @@ describe('AgentThinkingAccordion', () => {
 
   it('renders safe Langfuse hierarchy and metrics', () => {
     render(<AgentThinkingAccordion trace={trace} status="ready" />);
+    // Click header to open accordion
+    fireEvent.click(screen.getByRole('button'));
     expect(screen.getByText('merchant-advisor-flow')).toBeInTheDocument();
     expect(screen.getByText(/model-x/)).toBeInTheDocument();
     expect(screen.getAllByText(/15 tokens/i).length).toBeGreaterThan(0);
