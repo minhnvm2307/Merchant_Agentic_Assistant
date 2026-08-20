@@ -41,16 +41,13 @@ PlannerDecision = Annotated[PlannerRespond | PlannerDelegate, Field(discriminato
 _DECISION_ADAPTER = TypeAdapter(PlannerDecision)
 
 
-def _extract_json_substring(raw: str) -> str:
+def parse_planner_decision(raw: str) -> PlannerDecision:
+    """Strictly validate and parse raw JSON string into PlannerDecision using Pydantic."""
     text = raw.strip()
     if not text:
-        return ""
+        raise ValueError("Planner returned empty response")
 
-    # Strip <think>...</think> reasoning blocks if present
-    if "<think>" in text and "</think>" in text:
-        text = text.split("</think>", 1)[1].strip()
-
-    # Strip markdown code blocks: ```json ... ``` or ``` ... ```
+    # Strip markdown code fence if present
     if text.startswith("```"):
         lines = text.splitlines()
         if len(lines) >= 2:
@@ -58,25 +55,4 @@ def _extract_json_substring(raw: str) -> str:
             last_idx = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
             text = "\n".join(lines[first_idx:last_idx]).strip()
 
-    if text.startswith("{") and text.endswith("}"):
-        return text
-
-    first_brace = text.find("{")
-    last_brace = text.rfind("}")
-    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-        return text[first_brace : last_brace + 1]
-
-    return text
-
-
-def parse_planner_decision(raw: str) -> PlannerDecision:
-    cleaned = _extract_json_substring(raw)
-
-    if cleaned.startswith("{") and cleaned.endswith("}"):
-        return _DECISION_ADAPTER.validate_json(cleaned)
-
-    plain_text = raw.strip()
-    if plain_text:
-        return PlannerRespond(mode="respond", answer=plain_text)
-
-    raise ValueError("Planner returned empty response")
+    return _DECISION_ADAPTER.validate_json(text)
