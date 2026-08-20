@@ -270,8 +270,8 @@ def test_cohort_aggregation_resolves_search_reference_to_exact_observed_ids(monk
     assert captured["merchant_ids"] == ["110450", "110451"]
     assert captured["step_id"] == "cohort-analysis"
     assert aggregate_result["cohort_members"] == [
-        {"merchant_id": "110450", "name": "Quán A"},
-        {"merchant_id": "110451", "name": "Quán B"},
+        {"merchant_id": "110450", "name": "Quán A", "merchant_ref": "pub_01"},
+        {"merchant_id": "110451", "name": "Quán B", "merchant_ref": "pub_02"},
     ]
 
 

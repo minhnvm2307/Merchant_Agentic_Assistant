@@ -482,24 +482,30 @@ CitySlug = Literal[
 
 
 class SearchMerchantsInput(BaseModel):
-    query: str | None = Field(None, description="General search keyword for restaurant name, dish, or concept (e.g. 'sushi', 'cơm tấm', 'lẩu', 'gia đình')")
-    city: str | None = Field(None, description="City name or slug filter. Valid city_slugs format must be in snake format (e.g. 'da_nang', 'tp_hcm', 'ha_noi') or list separated by commas (e.g. 'da_nang, tp_hcm').")
-    cuisine: str | None = Field(None, description="Cuisine type filter (e.g. 'Món Nhật', 'Món Việt', 'Café/Dessert')")
-    category: str | None = Field(None, description="Category filter (e.g. 'Quán ăn', 'Nhà hàng', 'Café/Dessert')")
-    district: str | None = Field(None, description="District filter (e.g. 'Quận 1', 'Bình Thạnh', 'Hải Châu', 'Q1')")
-    ingredient: str | None = Field(None, description="Ingredient tag filter (e.g. 'bò', 'gà', 'hải sản', 'heo', 'tôm')")
-    diet: str | None = Field(None, description="Diet tag filter (e.g. 'chay', 'eat clean', 'keto')")
-    taste: str | None = Field(None, description="Taste tag filter (e.g. 'cay', 'chua', 'ngọt', 'đậm đà')")
-    customer_segment: str | None = Field(None, description="Customer segment tag filter (e.g. 'gia đình', 'học sinh sinh viên', 'dân văn phòng', 'cặp đôi')")
-    tier: Literal["hero", "background"] | None = Field(None, description="Merchant tier filter.")
-    price_level: Literal["rẻ", "trung bình", "cao cấp"] | None = Field(None, description="Price level segment.")
-    min_menu_price: int | None = Field(None, ge=0, description="Minimum available menu item price in VND.")
-    max_menu_price: int | None = Field(None, ge=0, description="Maximum affordable menu item price in VND.")
-    min_rating: float | None = Field(None, description="Minimum platform rating threshold (0.0 .. 5.0).")
-    anchor_merchant_id: str | None = Field(None, description="Owner merchant used as the center of a nearby search.")
-    radius_km: float | None = Field(None, ge=0.5, le=20, description="Radius around anchor merchant in kilometers.")
-    sort_by: Literal["relevance", "rating", "distance"] = Field("relevance", description="Deterministic result ordering.")
-    limit: int = Field(10, description="Max results (1..25)")
+    query: str | None = Field(
+        default=None,
+        description="Search keyword for restaurant name, dish, cuisine, or category (e.g. 'sushi', 'cơm tấm', 'món nhật').",
+    )
+    city: str | None = Field(
+        default=None,
+        description="City name or slug (e.g. 'da_nang', 'tp_hcm', 'ha_noi').",
+    )
+    cuisine: str | None = Field(default=None, description="Cuisine type filter.")
+    category: str | None = Field(default=None, description="Category filter.")
+    district: str | None = Field(default=None, description="District filter.")
+    ingredient: str | None = Field(default=None, description="Ingredient tag filter.")
+    diet: str | None = Field(default=None, description="Diet tag filter.")
+    taste: str | None = Field(default=None, description="Taste tag filter.")
+    customer_segment: str | None = Field(default=None, description="Customer segment tag filter.")
+    tier: Literal["hero", "background"] | None = Field(default=None, description="Merchant tier filter.")
+    price_level: Literal["rẻ", "trung bình", "cao cấp"] | None = Field(default=None, description="Price level segment.")
+    min_menu_price: int | None = Field(default=None, ge=0, description="Minimum available menu item price in VND.")
+    max_menu_price: int | None = Field(default=None, ge=0, description="Maximum affordable menu item price in VND.")
+    min_rating: float | None = Field(default=None, description="Minimum platform rating threshold (0.0 .. 5.0).")
+    anchor_merchant_id: str | None = Field(default=None, description="Owner merchant used as center of nearby search.")
+    radius_km: float | None = Field(default=5.0, ge=0.5, le=20.0, description="Radius around anchor merchant in km.")
+    sort_by: Literal["relevance", "rating", "distance"] = Field(default="relevance", description="Deterministic result ordering.")
+    limit: int = Field(default=5, ge=1, le=25, description="Max results (1..25, default 5).")
 
     @field_validator("anchor_merchant_id", mode="before")
     @classmethod

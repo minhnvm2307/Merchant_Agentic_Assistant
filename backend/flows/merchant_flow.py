@@ -81,9 +81,8 @@ class MerchantFlowDispatcher:
             select(Merchant).where(Merchant.merchant_id == merchant_id)
         ).scalar_one_or_none()
         if merchant is None:
-            return {"merchant_id": merchant_id}
+            return {"name": "Quán của bạn"}
         return {
-            "merchant_id": merchant.merchant_id,
             "name": merchant.name,
             "city": merchant.city_slug or merchant.city,
             "cuisine": merchant.cuisine,

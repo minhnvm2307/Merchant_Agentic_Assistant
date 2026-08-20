@@ -81,14 +81,14 @@ def get_merchant_reviews(
                     "review_id": row.review_id,
                     "rating": float(row.rating) if row.rating is not None else None,
                     "sentiment": row.sentiment,
-                    "text": row.text[:300],
+                    "text": row.text[:200],
                     "created_at": (
                         row.created_at.isoformat() if row.created_at else None
                     ),
                 }
                 for row in bounded
             ],
-            "evidence_refs": [f"review:{row.review_id}" for row in rows],
+            "evidence_refs": [f"review:{row.review_id}" for row in bounded],
         }
     finally:
         if db is None:

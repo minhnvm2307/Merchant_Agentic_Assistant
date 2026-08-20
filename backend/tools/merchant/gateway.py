@@ -75,9 +75,9 @@ class _GatewayTool(BaseTool):
 class GatewaySearchMerchantsTool(_GatewayTool):
     name: str = "search_merchants"
     description: str = (
-        "Search public merchants using explicit filters. City accepts a city name "
-        "or canonical snake-case city_slug; the gateway canonicalizes it before "
-        "cache and database lookup."
+        "Use this tool ONLY to search and discover public competitor restaurants and listings in the market.\n"
+        "Do NOT use this tool to query the owner's private restaurant data.\n"
+        "Returns: List of public competitor restaurants with ratings, cuisine, and pricing info."
     )
     args_schema: Type[BaseModel] = SearchMerchantsInput
 
@@ -85,16 +85,52 @@ class GatewaySearchMerchantsTool(_GatewayTool):
         return self._invoke(kwargs, lambda: self.gateway.run_market_search(**kwargs))
 
 
+class ReferenceRegistry:
+    """Manages session-scoped opaque handles (e.g. pub_01, pub_02) mapped to real internal IDs."""
+
+    def __init__(self) -> None:
+        self._ref_to_id: dict[str, str] = {}
+        self._id_to_ref: dict[str, str] = {}
+        self._counters: dict[str, int] = {}
+
+    def register(self, kind: str, real_id: str | int) -> str:
+        real_str = str(real_id)
+        if real_str in self._id_to_ref:
+            return self._id_to_ref[real_str]
+
+        idx = self._counters.get(kind, 0) + 1
+        self._counters[kind] = idx
+        ref = f"{kind}_{idx:02d}"
+        self._ref_to_id[ref] = real_str
+        self._id_to_ref[real_str] = ref
+        return ref
+
+    def resolve(self, ref_or_id: str) -> str:
+        if not ref_or_id:
+            raise ValueError("Empty reference provided")
+        ref_str = str(ref_or_id)
+        return self._ref_to_id.get(ref_str, ref_str)
+
+
 class PublicMerchantDetailInput(BaseModel):
-    merchant_id: str = Field(description="Public merchant ID from search results or conversation state.")
-    menu_limit: int = Field(default=20, ge=1, le=50)
+    merchant_ref: str | None = Field(
+        default=None,
+        description="Public competitor reference handle from search results (e.g. 'pub_01').",
+    )
+    merchant_id: str | None = Field(
+        default=None,
+        description="Public competitor merchant identifier or reference handle.",
+    )
+    menu_limit: int = Field(default=5, ge=1, le=20, description="Max representative menu items to retrieve (default 5).")
 
 
 class GatewayPublicMerchantDetailTool(_GatewayTool):
     name: str = "get_public_merchant_detail"
     description: str = (
-        "Retrieve public merchant details by ID, including opening hours, address, "
-        "coordinates, ratings, and available menu items. Use for menu/hour follow-ups."
+        "Use this tool ONLY to retrieve detailed public information (address, opening hours, representative menu items) "
+        "for a specific competitor after obtaining its merchant_ref (e.g. 'pub_01') or ID from search results.\n"
+        "Do NOT use this tool for owner merchant queries or broad discovery.\n"
+        "Returns: Competitor details, ratings, and representative menu items."
     )
     args_schema: Type[BaseModel] = PublicMerchantDetailInput
 
@@ -200,8 +236,9 @@ class GatewayAggregateCohortInput(BaseModel):
 class GatewayOwnerProfileTool(_GatewayTool):
     name: str = "get_owner_profile_summary"
     description: str = (
-        "Retrieve the current merchant owner's quality profile. The owner target "
-        "is bound by the current run and cannot be changed by tool arguments."
+        "Use this tool ONLY to retrieve the current owner's merchant profile, tier, and 8-dimension quality scores.\n"
+        "Do NOT use this tool for quantitative operational KPIs (revenue/orders) or customer review texts.\n"
+        "Returns: Store profile attributes and dimension quality scores."
     )
     args_schema: Type[BaseModel] = OwnerProfileInput
 
@@ -214,7 +251,12 @@ class GatewayOwnerProfileTool(_GatewayTool):
 
 class GatewayOwnerMetricsTool(_GatewayTool):
     name: str = "get_owner_operational_metrics"
-    description: str = "Retrieve the current owner's operational metrics."
+    description: str = (
+        "Use this tool ONLY for quantitative operational KPIs of the owner's merchant, "
+        "such as revenue, orders, rating, cancellation rate, and preparation time.\n"
+        "Do NOT use this tool for customer review text, complaints, or diagnosis.\n"
+        "Returns: Aggregated numeric operational metrics."
+    )
     args_schema: Type[BaseModel] = OwnerMetricsInput
 
     def _run(self, **kwargs: Any) -> str:
@@ -223,7 +265,12 @@ class GatewayOwnerMetricsTool(_GatewayTool):
 
 class GatewayOwnerReviewsTool(_GatewayTool):
     name: str = "get_owner_reviews"
-    description: str = "Retrieve the current owner's review aggregates and bounded samples."
+    description: str = (
+        "Use this tool ONLY to retrieve customer review aggregates, sentiment breakdown, rating distribution, "
+        "key feedback themes, and sample reviews for the owner's merchant.\n"
+        "Do NOT use this tool for formal operational complaints or platform policy.\n"
+        "Returns: Review sentiment stats, themes, and review samples."
+    )
     args_schema: Type[BaseModel] = OwnerReviewsInput
 
     def _run(self, **kwargs: Any) -> str:
@@ -232,7 +279,12 @@ class GatewayOwnerReviewsTool(_GatewayTool):
 
 class GatewayOwnerComplaintsTool(_GatewayTool):
     name: str = "get_owner_complaints"
-    description: str = "Retrieve the current owner's private complaint aggregates."
+    description: str = (
+        "Use this tool ONLY to retrieve formal customer operational complaints "
+        "(late delivery, cold food, missing items, packaging issues) for the owner's merchant.\n"
+        "Do NOT use this tool for general positive reviews or platform terms.\n"
+        "Returns: Categorized complaint counts, severity levels, and complaint samples."
+    )
     args_schema: Type[BaseModel] = OwnerComplaintsInput
 
     def _run(self, **kwargs: Any) -> str:
@@ -241,7 +293,11 @@ class GatewayOwnerComplaintsTool(_GatewayTool):
 
 class GatewayOwnerMenuTool(_GatewayTool):
     name: str = "get_owner_menu_and_food_images"
-    description: str = "Retrieve the current owner's menu and food image metadata."
+    description: str = (
+        "Use this tool ONLY to retrieve the owner's menu items, pricing, and food image metadata.\n"
+        "Do NOT use this tool for public competitor menus (use get_public_merchant_detail).\n"
+        "Returns: List of menu items and image quality metadata."
+    )
     args_schema: Type[BaseModel] = OwnerMenuInput
 
     def _run(self, **kwargs: Any) -> str:
@@ -251,8 +307,9 @@ class GatewayOwnerMenuTool(_GatewayTool):
 class GatewayOwnerImageComparisonTool(_GatewayTool):
     name: str = "compare_merchant_images"
     description: str = (
-        "Compare current-owner food image metadata with public cohort images. "
-        "Use a search_ref from search_merchants whenever available."
+        "Use this tool ONLY to compare the current owner's food image metadata with public cohort images.\n"
+        "Do NOT use this tool for price or metric comparisons.\n"
+        "Returns: Image comparison metrics and blur analysis."
     )
     args_schema: Type[BaseModel] = OwnerImageComparisonInput
 
@@ -262,7 +319,12 @@ class GatewayOwnerImageComparisonTool(_GatewayTool):
 
 class GatewayOwnerDiagnosisTool(_GatewayTool):
     name: str = "diagnose_owner_merchant"
-    description: str = "Generate evidence-backed diagnosis for the current owner only."
+    description: str = (
+        "Use this tool when the user asks WHY performance or scores dropped, what root-cause problems exist, "
+        "or requests an evidence-backed diagnostic analysis.\n"
+        "Do NOT use this tool just to retrieve raw metrics or review texts (use get_owner_metrics or get_owner_reviews).\n"
+        "Returns: Diagnosed root causes and supporting evidence references."
+    )
     args_schema: Type[BaseModel] = OwnerBoundInput
 
     def _run(self, **kwargs: Any) -> str:
@@ -271,7 +333,11 @@ class GatewayOwnerDiagnosisTool(_GatewayTool):
 
 class GatewayOwnerRecommendationTool(_GatewayTool):
     name: str = "recommend_owner_improvements"
-    description: str = "Generate evidence-backed improvement actions for the current owner only."
+    description: str = (
+        "Use this tool when the user asks HOW to improve or requests concrete action recommendations to resolve diagnostic weaknesses.\n"
+        "Do NOT use this tool for raw data retrieval.\n"
+        "Returns: Actionable improvement steps and expected impact."
+    )
     args_schema: Type[BaseModel] = OwnerBoundInput
 
     def _run(self, **kwargs: Any) -> str:
@@ -281,8 +347,9 @@ class GatewayOwnerRecommendationTool(_GatewayTool):
 class GatewayOwnerBenchmarkTool(_GatewayTool):
     name: str = "compare_owner_to_nearby_public_merchants"
     description: str = (
-        "Compare the current owner with nearby public merchants. Radius, cuisine, "
-        "and category must be explicit when required by the question."
+        "Use this tool ONLY to compare the owner's performance metrics against district/city-wide aggregated cohort benchmarks and market averages.\n"
+        "Do NOT use this tool for 1-on-1 single competitor comparison (use search_merchants).\n"
+        "Returns: Comparative benchmark diffs and market percentiles."
     )
     args_schema: Type[BaseModel] = OwnerBenchmarkInput
 
@@ -314,8 +381,9 @@ class GatewayCompareOwnerCohortTool(_GatewayTool):
 class GatewayPolicySearchTool(_GatewayTool):
     name: str = "search_policy_documents"
     description: str = (
-        "Search official Green SM policy chunks. Use for fees, incentives, terms, "
-        "procedures, privacy, and policy-aware merchant recommendations."
+        "Use this tool ONLY to search official Green SM merchant policies, platform terms, fees, incentive procedures, sanctions, and regulations.\n"
+        "Do NOT use this tool for merchant operational or market data.\n"
+        "Returns: Relevant policy document chunks and guidelines."
     )
     args_schema: Type[BaseModel] = PolicySearchInput
 
@@ -347,6 +415,9 @@ class RunScopedMerchantToolGateway:
         self._latest_public_search_members: list[dict[str, Any]] = []
         self._known_public_merchant_ids: set[str] = set()
         self._completed_tool_calls = 0
+        self._executed_tool_cache: dict[str, str] = {}
+        self._max_tool_budget: int = 8
+        self._registry = ReferenceRegistry()
 
     def allow_public_merchant_ids(self, merchant_ids: list[str]) -> None:
         self._known_public_merchant_ids.update(str(value) for value in merchant_ids if value)
@@ -516,6 +587,11 @@ class RunScopedMerchantToolGateway:
                 self._policy.competitor_public(merchant)
                 for merchant in result.get("merchants", [])
             ]
+            for merchant in result["merchants"]:
+                m_id = merchant.get("merchant_id")
+                if m_id:
+                    merchant["merchant_ref"] = self._registry.register("pub", m_id)
+
             self._latest_public_search_members = result["merchants"]
             merchant_ids = [
                 str(merchant["merchant_id"])
@@ -550,7 +626,12 @@ class RunScopedMerchantToolGateway:
 
     def run_public_detail(self, **raw_args: Any) -> str:
         args = PublicMerchantDetailInput.model_validate(raw_args).model_dump()
-        target = str(args["merchant_id"])
+        ref_or_id = args.get("merchant_ref") or args.get("merchant_id")
+        if not ref_or_id:
+            raise ValueError("merchant_ref or merchant_id is required")
+
+        target = self._registry.resolve(str(ref_or_id))
+        args["merchant_id"] = target
         if target == self.context.owner_merchant_id:
             raise ValueError(
                 "Owner merchant_id is not a public-search target; use an owner tool."
@@ -567,7 +648,7 @@ class RunScopedMerchantToolGateway:
             execute=lambda: self._with_tool_session(
                 lambda db: self._policy.competitor_public(
                     get_public_merchant_detail(
-                        merchant_id=args["merchant_id"],
+                        merchant_id=target,
                         menu_limit=args["menu_limit"],
                         db=db,
                         cache=self._cache,
@@ -875,6 +956,21 @@ class RunScopedMerchantToolGateway:
         args: dict[str, Any],
         execute: Any,
     ) -> str:
+        # Exact Deduplication Check
+        cache_key = f"{tool_name}:{json.dumps(args, sort_keys=True, default=str)}"
+        if cache_key in self._executed_tool_cache:
+            return self._executed_tool_cache[cache_key]
+
+        # Tool Budget Guardrail
+        if self._completed_tool_calls >= self._max_tool_budget:
+            return json.dumps(
+                {
+                    "status": "budget_exhausted",
+                    "message": "Tool execution budget reached for this run. Conclude with available evidence.",
+                },
+                ensure_ascii=False,
+            )
+
         started = time.perf_counter()
         self._emit(
             "tool_started",
@@ -901,4 +997,6 @@ class RunScopedMerchantToolGateway:
             result=result,
             duration_ms=round((time.perf_counter() - started) * 1000, 3),
         )
-        return json.dumps(result, ensure_ascii=False)
+        result_str = json.dumps(result, ensure_ascii=False)
+        self._executed_tool_cache[cache_key] = result_str
+        return result_str
