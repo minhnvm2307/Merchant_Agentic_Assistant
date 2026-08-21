@@ -1,0 +1,247 @@
+"""Chat Session Service (Design §6.2, §8.1) — Session State & Message History Management.
+
+Manages durable session state in PostgreSQL and hot copy in Redis.
+Includes compact session memory formatting for token-efficient LLM context injection.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from typing import Any
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from database.models import ChatSession, ChatMessage
+from core.cache import CacheKeys, TTL_SESSION_CONTEXT
+from core.dependencies import get_cache
+
+
+class ChatSessionService:
+    """Service layer for chat sessions, compact memory, and message history."""
+
+    def __init__(self, db: Session) -> None:
+        self._db = db
+        self._cache = get_cache()
+
+    def get_or_create_session(
+        self,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        title: str | None = None,
+        context_snapshot: dict[str, Any] | None = None,
+    ) -> ChatSession:
+        """Get existing session or create a new session."""
+        sid = session_id or f"sess_{uuid.uuid4().hex[:12]}"
+        stmt = select(ChatSession).where(ChatSession.session_id == sid)
+        session_obj = self._db.execute(stmt).scalar_one_or_none()
+
+        if session_obj:
+            if context_snapshot:
+                existing_merchant = (session_obj.context_snapshot_json or {}).get("merchant_id")
+                requested_merchant = context_snapshot.get("merchant_id")
+                if existing_merchant and requested_merchant and str(existing_merchant) != str(requested_merchant):
+                    raise ValueError("Session belongs to a different merchant")
+                merged = {**(session_obj.context_snapshot_json or {}), **context_snapshot}
+                session_obj.context_snapshot_json = merged
+                session_obj.updated_at = datetime.utcnow()
+                self._db.commit()
+                # Update Redis
+                redis_key = CacheKeys.session_context(sid)
+                self._cache.set(redis_key, merged, ttl_seconds=TTL_SESSION_CONTEXT)
+            return session_obj
+
+        session_obj = ChatSession(
+            session_id=sid,
+            user_id=user_id,
+            title=title or f"Chat Session {sid}",
+            context_snapshot_json=context_snapshot or {},
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        self._db.add(session_obj)
+        self._db.commit()
+        self._db.refresh(session_obj)
+
+        # Sync hot copy to Redis
+        redis_key = CacheKeys.session_context(sid)
+        self._cache.set(redis_key, context_snapshot or {}, ttl_seconds=TTL_SESSION_CONTEXT)
+
+        return session_obj
+
+    def append_message(
+        self,
+        session_id: str,
+        sender: str,
+        text: str,
+        trace_id: str | None = None,
+        structured_payload: dict[str, Any] | None = None,
+    ) -> ChatMessage:
+        """Append user or agent chat message to session history."""
+        msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+        msg = ChatMessage(
+            message_id=msg_id,
+            session_id=session_id,
+            sender=sender,
+            text=text,
+            trace_id=trace_id,
+            structured_payload_json=structured_payload or {},
+            timestamp=datetime.utcnow(),
+        )
+        self._db.add(msg)
+
+        # Update session last_trace_id and updated_at
+        stmt = select(ChatSession).where(ChatSession.session_id == session_id)
+        session_obj = self._db.execute(stmt).scalar_one_or_none()
+        if session_obj:
+            if trace_id:
+                session_obj.last_trace_id = trace_id
+            session_obj.updated_at = datetime.utcnow()
+
+        self._db.commit()
+        self._db.refresh(msg)
+        return msg
+
+    def get_recent_history(self, session_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Fetch recent message history formatted for Agent context injection."""
+        return [
+            {
+                "message_id": m.message_id,
+                "sender": m.sender,
+                "text": m.text,
+                "trace_id": m.trace_id,
+                "timestamp": str(m.timestamp),
+                "merchants": (m.structured_payload_json or {}).get("merchants", []),
+            }
+            for m in self._recent_messages(session_id, limit)
+        ]
+
+    def get_compact_history(self, session_id: str, max_turns: int = 3) -> str:
+        """Fetch compact history as plain text (last max_turns turns).
+
+        Agent responses preserve key facts (up to 450 characters) to retain context
+        like merchant names, ratings, and recommendations for multi-turn queries.
+        """
+        limit = max_turns * 2
+        lines: list[str] = []
+        for m in self._recent_messages(session_id, limit):
+            text = (m.text or "").strip()
+            role = "assistant" if m.sender in ("agent", "assistant") else "user"
+            if role == "assistant" and len(text) > 450:
+                text = text[:450] + "..."
+            lines.append(f"{role}: {text}")
+        return "\n".join(lines)
+
+    def _recent_messages(self, session_id: str, limit: int) -> list[ChatMessage]:
+        rows = self._db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.timestamp.desc())
+            .limit(limit)
+        ).scalars()
+        return list(reversed(list(rows)))
+
+    def get_session_snapshot(self, session_id: str) -> dict[str, Any]:
+        """Fetch hot snapshot from Redis if present, falling back to DB."""
+        redis_key = CacheKeys.session_context(session_id)
+        cached = self._cache.get(redis_key)
+        if cached is not None:
+            return cached
+
+        stmt = select(ChatSession).where(ChatSession.session_id == session_id)
+        session_obj = self._db.execute(stmt).scalar_one_or_none()
+        if session_obj and session_obj.context_snapshot_json:
+            snapshot = session_obj.context_snapshot_json
+            self._cache.set(redis_key, snapshot, ttl_seconds=TTL_SESSION_CONTEXT)
+            return snapshot
+        return {}
+
+    def update_session_snapshot(
+        self,
+        session_id: str,
+        snapshot: dict[str, Any],
+        last_trace_id: str | None = None,
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Update durable snapshot in PG and hot copy in Redis."""
+        stmt = select(ChatSession).where(ChatSession.session_id == session_id)
+        session_obj = self._db.execute(stmt).scalar_one_or_none()
+
+        if session_obj:
+            merged = (
+                dict(snapshot)
+                if replace
+                else {**(session_obj.context_snapshot_json or {}), **snapshot}
+            )
+            session_obj.context_snapshot_json = merged
+            if last_trace_id:
+                session_obj.last_trace_id = last_trace_id
+            session_obj.updated_at = datetime.utcnow()
+            self._db.commit()
+            snapshot = merged
+            self._cache.set(
+                CacheKeys.session_context(session_id),
+                snapshot,
+                ttl_seconds=TTL_SESSION_CONTEXT,
+            )
+
+    def list_merchant_sessions(self, merchant_id: str, limit: int = 30) -> list[dict[str, Any]]:
+        """List all chat sessions associated with a merchant_id, ordered by updated_at desc."""
+        stmt = (
+            select(ChatSession)
+            .order_by(ChatSession.updated_at.desc())
+            .limit(limit)
+        )
+        sessions = list(self._db.execute(stmt).scalars().all())
+
+        result = []
+        for s in sessions:
+            context = s.context_snapshot_json or {}
+            # Filter if context has merchant_id
+            if context.get("merchant_id") and context.get("merchant_id") != merchant_id:
+                continue
+
+            msg_stmt = (
+                select(ChatMessage)
+                .where(ChatMessage.session_id == s.session_id)
+                .order_by(ChatMessage.timestamp.desc())
+                .limit(1)
+            )
+            last_msg = self._db.execute(msg_stmt).scalar_one_or_none()
+            if not last_msg:
+                continue
+            
+            first_user_stmt = (
+                select(ChatMessage)
+                .where(ChatMessage.session_id == s.session_id, ChatMessage.sender == "user")
+                .order_by(ChatMessage.timestamp.asc())
+                .limit(1)
+            )
+            first_user_msg = self._db.execute(first_user_stmt).scalar_one_or_none()
+
+            title = s.title
+            if first_user_msg and first_user_msg.text:
+                title = first_user_msg.text[:40] + ("..." if len(first_user_msg.text) > 40 else "")
+
+            result.append({
+                "session_id": s.session_id,
+                "title": title or f"Trò chuyện {s.session_id[:8]}",
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+                "last_message": last_msg.text if last_msg else "",
+            })
+        return result
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete session and all its messages."""
+        msgs = list(self._db.execute(select(ChatMessage).where(ChatMessage.session_id == session_id)).scalars().all())
+        for m in msgs:
+            self._db.delete(m)
+
+        s = self._db.execute(select(ChatSession).where(ChatSession.session_id == session_id)).scalar_one_or_none()
+        if s:
+            self._db.delete(s)
+            self._db.commit()
+            return True
+        self._db.commit()
+        return False

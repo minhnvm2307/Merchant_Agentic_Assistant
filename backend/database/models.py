@@ -1,8 +1,33 @@
-import datetime
-from sqlalchemy import Column, String, Float, Integer, ForeignKey, TIMESTAMP, CheckConstraint, text as sa_text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    Computed,
+    Date,
+    Float,
+    ForeignKey,
+    Integer,
+    Index,
+    Numeric,
+    String,
+    Text,
+    Time,
+    TIMESTAMP,
+    event,
+    text as sa_text,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import relationship
 from database.connection import Base
+from models.merchant_agentic import normalize_city_slugs
+from services.geo.h3_index import H3CandidateIndex
+
+
+_H3_INDEXES = {
+    6: H3CandidateIndex(resolution=6),
+    8: H3CandidateIndex(resolution=8),
+    9: H3CandidateIndex(resolution=9),
+}
 
 class Merchant(Base):
     __tablename__ = "merchants"
@@ -10,21 +35,62 @@ class Merchant(Base):
     merchant_id = Column(String, primary_key=True)
     name = Column(String, nullable=False)
     cuisine = Column(String, nullable=False)
+    category = Column(Text)
     address = Column(String)
     lat = Column(Float)
     lng = Column(Float)
-    open_hours = Column(JSONB)
+    h3_index_6 = Column(String(32), index=True)
+    merchant_h3_cell = Column(String(32), index=True)
+    h3_index_9 = Column(String(32), index=True)
+    opens_at = Column(Time)
+    closes_at = Column(Time)
+    timezone = Column(String, nullable=False, default="Asia/Ho_Chi_Minh")
+    taste_tags = Column(ARRAY(Text), nullable=False, default=list)
+    diet_tags = Column(ARRAY(Text), nullable=False, default=list)
+    ingredient_tags = Column(ARRAY(Text), nullable=False, default=list)
+    customer_segments = Column(ARRAY(Text), nullable=False, default=list)
     city = Column(String, nullable=False)
     city_slug = Column(String, nullable=False)
     source = Column(String, default="shopeefood")
     source_url = Column(String)
-    is_demo_target = Column(Integer, default=0)
-    created_at = Column(TIMESTAMP(timezone=False), server_default=sa_text("CURRENT_TIMESTAMP"))
+    is_active = Column(Boolean, nullable=False, default=True)
+    is_demo_target = Column(Boolean, nullable=False, default=False)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=sa_text("CURRENT_TIMESTAMP"))
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=sa_text("CURRENT_TIMESTAMP"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "(lat IS NULL AND lng IS NULL) OR (lat IS NOT NULL AND lng IS NOT NULL)",
+            name="ck_merchants_coordinate_pair",
+        ),
+        CheckConstraint("lat IS NULL OR lat BETWEEN -90 AND 90", name="ck_merchants_lat"),
+        CheckConstraint("lng IS NULL OR lng BETWEEN -180 AND 180", name="ck_merchants_lng"),
+    )
     
     menu_items = relationship("MenuItem", back_populates="merchant", cascade="all, delete-orphan")
     reviews = relationship("Review", back_populates="merchant", cascade="all, delete-orphan")
     delivery_feedbacks = relationship("DeliveryFeedback", back_populates="merchant", cascade="all, delete-orphan")
     food_images = relationship("FoodImage", back_populates="merchant", cascade="all, delete-orphan")
+
+
+@event.listens_for(Merchant, "before_insert")
+@event.listens_for(Merchant, "before_update")
+def _synchronize_merchant_h3_cell(_mapper, _connection, merchant: Merchant) -> None:
+    """Keep persisted location fields canonical when a merchant changes."""
+    if merchant.city_slug:
+        merchant.city_slug = normalize_city_slugs(merchant.city_slug) or merchant.city_slug
+    elif merchant.city:
+        merchant.city_slug = normalize_city_slugs(merchant.city)
+    has_location = merchant.lat is not None and merchant.lng is not None
+    merchant.h3_index_6 = (
+        _H3_INDEXES[6].cell_for(merchant.lat, merchant.lng) if has_location else None
+    )
+    merchant.merchant_h3_cell = (
+        _H3_INDEXES[8].cell_for(merchant.lat, merchant.lng) if has_location else None
+    )
+    merchant.h3_index_9 = (
+        _H3_INDEXES[9].cell_for(merchant.lat, merchant.lng) if has_location else None
+    )
 
 class MenuItem(Base):
     __tablename__ = "menu_items"
@@ -36,10 +102,20 @@ class MenuItem(Base):
     description = Column(String)
     category = Column(String)
     image_url = Column(String)
-    diet_tags = Column(JSONB)
-    ingredient_tags = Column(JSONB)
-    taste_tags = Column(JSONB)
-    created_at = Column(TIMESTAMP(timezone=False), server_default=sa_text("CURRENT_TIMESTAMP"))
+    discount_price = Column(Integer)
+    total_like = Column(Integer, nullable=False, default=0)
+    has_photo = Column(Boolean, nullable=False, default=False)
+    is_available = Column(Boolean, nullable=False, default=True)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=sa_text("CURRENT_TIMESTAMP"))
+
+    __table_args__ = (
+        CheckConstraint("price >= 0", name="ck_menu_items_price"),
+        CheckConstraint(
+            "discount_price IS NULL OR discount_price >= 0",
+            name="ck_menu_items_discount_price",
+        ),
+        CheckConstraint("total_like >= 0", name="ck_menu_items_total_like"),
+    )
     
     merchant = relationship("Merchant", back_populates="menu_items")
     food_images = relationship("FoodImage", back_populates="menu_item", cascade="all, delete-orphan")
@@ -49,19 +125,21 @@ class Review(Base):
     
     review_id = Column(String, primary_key=True)
     merchant_id = Column(String, ForeignKey("merchants.merchant_id", ondelete="CASCADE"), nullable=False)
-    foody_restaurant_id = Column(Integer)
-    rating = Column(Float)
-    text = Column(String, nullable=False)
+    rating = Column(Numeric(4, 2))
+    text = Column(Text, nullable=False)
     sentiment = Column(String, CheckConstraint("sentiment IN ('positive', 'negative', 'neutral')"))
-    author_id = Column(String)
-    author_name = Column(String)
     total_like = Column(Integer, default=0)
-    total_comment = Column(Integer, default=0)
-    total_pictures = Column(Integer, default=0)
-    review_url = Column(String)
     source_page = Column(String)
-    comments_json = Column(JSONB)
-    created_at = Column(TIMESTAMP(timezone=False), nullable=False)
+    source_kind = Column(String, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("rating IS NULL OR rating BETWEEN 0 AND 10", name="ck_reviews_rating"),
+        CheckConstraint(
+            "source_kind IN ('real', 'synthetic', 'heuristic', 'mixed', 'development_fixture')",
+            name="ck_reviews_source_kind",
+        ),
+    )
     
     merchant = relationship("Merchant", back_populates="reviews")
 
@@ -72,8 +150,18 @@ class DeliveryFeedback(Base):
     merchant_id = Column(String, ForeignKey("merchants.merchant_id", ondelete="CASCADE"), nullable=False)
     driver_id = Column(String, nullable=False)
     rating = Column(Integer, CheckConstraint("rating BETWEEN 1 AND 5"))
-    comment = Column(String)
-    created_at = Column(TIMESTAMP(timezone=False), nullable=False)
+    comment = Column(Text)
+    on_time = Column(Boolean)
+    issue = Column(Text)
+    source_kind = Column(String, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "source_kind IN ('real', 'synthetic', 'heuristic', 'mixed', 'development_fixture')",
+            name="ck_delivery_feedbacks_source_kind",
+        ),
+    )
     
     merchant = relationship("Merchant", back_populates="delivery_feedbacks")
 
@@ -87,7 +175,7 @@ class FoodImage(Base):
     dish_image_quality = Column(Float, CheckConstraint("dish_image_quality BETWEEN 0 AND 1"))
     logo_quality = Column(Float, CheckConstraint("logo_quality BETWEEN 0 AND 1"))
     blur_score = Column(Float, CheckConstraint("blur_score BETWEEN 0 AND 1"))
-    created_at = Column(TIMESTAMP(timezone=False), server_default=sa_text("CURRENT_TIMESTAMP"))
+    created_at = Column(TIMESTAMP(timezone=True), server_default=sa_text("CURRENT_TIMESTAMP"))
     
     merchant = relationship("Merchant", back_populates="food_images")
     menu_item = relationship("MenuItem", back_populates="food_images")
@@ -96,15 +184,243 @@ class OperationalMetric(Base):
     __tablename__ = "operational_metrics"
     
     merchant_id = Column(String, ForeignKey("merchants.merchant_id", ondelete="CASCADE"), primary_key=True)
-    avg_prep_time_min = Column(Float, default=12.0)
-    peak_hours = Column(JSONB)
+    avg_prep_time_min = Column(Numeric(6, 2))
+    cancel_rate = Column(Numeric(5, 4))
+    acceptance_rate = Column(Numeric(5, 4))
+    estimated_daily_orders = Column(Integer)
+    peak_hours = Column(ARRAY(Text), nullable=False, default=list)
+    avg_delivery_time_min = Column(Numeric(6, 2))
+    on_time_rate = Column(Numeric(5, 4))
+    driver_rating = Column(Numeric(3, 2))
+    packaging_ok_rate = Column(Numeric(5, 4))
+    source_kind = Column(String, nullable=False)
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=sa_text("CURRENT_TIMESTAMP"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "avg_prep_time_min IS NULL OR avg_prep_time_min >= 0",
+            name="ck_operational_metrics_prep",
+        ),
+        CheckConstraint(
+            "cancel_rate IS NULL OR cancel_rate BETWEEN 0 AND 1",
+            name="ck_operational_metrics_cancel_rate",
+        ),
+        CheckConstraint(
+            "acceptance_rate IS NULL OR acceptance_rate BETWEEN 0 AND 1",
+            name="ck_operational_metrics_acceptance_rate",
+        ),
+        CheckConstraint(
+            "estimated_daily_orders IS NULL OR estimated_daily_orders >= 0",
+            name="ck_operational_metrics_daily_orders",
+        ),
+        CheckConstraint(
+            "avg_delivery_time_min IS NULL OR avg_delivery_time_min >= 0",
+            name="ck_operational_metrics_delivery_time",
+        ),
+        CheckConstraint(
+            "on_time_rate IS NULL OR on_time_rate BETWEEN 0 AND 1",
+            name="ck_operational_metrics_on_time_rate",
+        ),
+        CheckConstraint(
+            "driver_rating IS NULL OR driver_rating BETWEEN 0 AND 5",
+            name="ck_operational_metrics_driver_rating",
+        ),
+        CheckConstraint(
+            "packaging_ok_rate IS NULL OR packaging_ok_rate BETWEEN 0 AND 1",
+            name="ck_operational_metrics_packaging_rate",
+        ),
+    )
 
 class MerchantProfile(Base):
     __tablename__ = "merchant_profiles"
-    
+
     merchant_id = Column(String, ForeignKey("merchants.merchant_id", ondelete="CASCADE"), primary_key=True)
-    dimensions_json = Column(JSONB, nullable=False)
-    updated_at = Column(TIMESTAMP(timezone=False), server_default=sa_text("CURRENT_TIMESTAMP"))
+    tier = Column(String, nullable=False)
+    price_level = Column(String, nullable=False)
+    food_quality_score = Column(Numeric(4, 3), nullable=False)
+    image_quality_score = Column(Numeric(4, 3), nullable=False)
+    delivery_quality_score = Column(Numeric(4, 3), nullable=False)
+    packaging_score = Column(Numeric(4, 3), nullable=False)
+    service_score = Column(Numeric(4, 3), nullable=False)
+    waiting_time_score = Column(Numeric(4, 3), nullable=False)
+    menu_diversity_score = Column(Numeric(4, 3), nullable=False)
+    price_competitiveness_score = Column(Numeric(4, 3), nullable=False)
+    overall_score_internal = Column(
+        Numeric(4, 3),
+        Computed(
+            "("
+            "food_quality_score + image_quality_score + delivery_quality_score + "
+            "packaging_score + service_score + waiting_time_score + "
+            "menu_diversity_score + price_competitiveness_score"
+            ") / 8.0",
+            persisted=True,
+        ),
+    )
+    scoring_version = Column(String, nullable=False)
+    scored_at = Column(TIMESTAMP(timezone=True), nullable=False)
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=sa_text("CURRENT_TIMESTAMP"))
+
+    __table_args__ = (
+        CheckConstraint("tier IN ('hero', 'background')", name="ck_merchant_profiles_tier"),
+        CheckConstraint(
+            "price_level IN ('rẻ', 'trung bình', 'cao cấp')",
+            name="ck_merchant_profiles_price_level",
+        ),
+        *tuple(
+            CheckConstraint(
+                f"{name} BETWEEN 0 AND 1",
+                name=f"ck_merchant_profiles_{name}",
+            )
+            for name in (
+                "food_quality_score",
+                "image_quality_score",
+                "delivery_quality_score",
+                "packaging_score",
+                "service_score",
+                "waiting_time_score",
+                "menu_diversity_score",
+                "price_competitiveness_score",
+            )
+        ),
+    )
+
+
+class MerchantRating(Base):
+    __tablename__ = "merchant_ratings"
+
+    merchant_id = Column(String, ForeignKey("merchants.merchant_id", ondelete="CASCADE"), primary_key=True)
+    shopeefood_rating = Column(Numeric(3, 2))
+    shopeefood_review_count = Column(Integer)
+    foody_rating = Column(Numeric(4, 2))
+    foody_review_count = Column(Integer)
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=sa_text("CURRENT_TIMESTAMP"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "shopeefood_rating IS NULL OR shopeefood_rating BETWEEN 0 AND 5",
+            name="ck_merchant_ratings_shopeefood",
+        ),
+        CheckConstraint(
+            "foody_rating IS NULL OR foody_rating BETWEEN 0 AND 10",
+            name="ck_merchant_ratings_foody",
+        ),
+        CheckConstraint(
+            "shopeefood_review_count IS NULL OR shopeefood_review_count >= 0",
+            name="ck_merchant_ratings_shopeefood_count",
+        ),
+        CheckConstraint(
+            "foody_review_count IS NULL OR foody_review_count >= 0",
+            name="ck_merchant_ratings_foody_count",
+        ),
+    )
+
+
+class MerchantDimensionCalculation(Base):
+    __tablename__ = "merchant_dimension_calculations"
+
+    merchant_id = Column(String, ForeignKey("merchants.merchant_id", ondelete="CASCADE"), primary_key=True)
+    dimension = Column(String, primary_key=True)
+    basis = Column(Text, nullable=False)
+    source_kind = Column(String, nullable=False)
+    scoring_version = Column(String, nullable=False)
+    calculated_at = Column(TIMESTAMP(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "dimension IN ('food_quality', 'image_quality', 'delivery_quality', "
+            "'packaging', 'service', 'waiting_time', 'menu_diversity', "
+            "'price_competitiveness')",
+            name="ck_dimension_calculations_dimension",
+        ),
+        CheckConstraint(
+            "source_kind IN ('real', 'synthetic', 'heuristic', 'mixed', "
+            "'development_fixture')",
+            name="ck_dimension_calculations_source",
+        ),
+    )
+
+
+class MerchantDimensionEvidence(Base):
+    __tablename__ = "merchant_dimension_evidence"
+
+    evidence_id = Column(String, primary_key=True)
+    merchant_id = Column(String, ForeignKey("merchants.merchant_id", ondelete="CASCADE"), nullable=False)
+    dimension = Column(String, nullable=False)
+    evidence_type = Column(String, nullable=False)
+    value_numeric = Column(Numeric)
+    value_text = Column(Text)
+    value_boolean = Column(Boolean)
+    unit = Column(String)
+    reference_type = Column(String)
+    reference_ids = Column(ARRAY(Text), nullable=False, default=list)
+    source_kind = Column(String, nullable=False)
+    observed_at = Column(TIMESTAMP(timezone=True))
+    created_at = Column(TIMESTAMP(timezone=True), server_default=sa_text("CURRENT_TIMESTAMP"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "dimension IN ('food_quality', 'image_quality', 'delivery_quality', "
+            "'packaging', 'service', 'waiting_time', 'menu_diversity', "
+            "'price_competitiveness')",
+            name="ck_dimension_evidence_dimension",
+        ),
+        CheckConstraint(
+            "source_kind IN ('real', 'synthetic', 'heuristic', 'mixed', "
+            "'development_fixture')",
+            name="ck_dimension_evidence_source",
+        ),
+        CheckConstraint(
+            "num_nonnulls(value_numeric, value_text, value_boolean) = 1",
+            name="ck_dimension_evidence_one_value",
+        ),
+    )
+
+
+class MerchantComplaint(Base):
+    __tablename__ = "merchant_complaints"
+
+    complaint_id = Column(String, primary_key=True)
+    merchant_id = Column(String, ForeignKey("merchants.merchant_id", ondelete="CASCADE"), nullable=False)
+    category = Column(String, nullable=False)
+    severity = Column(String, nullable=False)
+    text = Column(Text, nullable=False)
+    occurred_on = Column(Date)
+    review_id = Column(String, ForeignKey("reviews.review_id", ondelete="SET NULL"))
+    source_kind = Column(String, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=sa_text("CURRENT_TIMESTAMP"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('giao_hàng_trễ', 'món_nguội', "
+            "'sai_hoặc_thiếu_món', 'đóng_gói_kém', 'thái_độ_phục_vụ', "
+            "'giá_cao', 'vệ_sinh', 'chất_lượng_món')",
+            name="ck_merchant_complaints_category",
+        ),
+        CheckConstraint(
+            "severity IN ('low', 'medium', 'high')",
+            name="ck_merchant_complaints_severity",
+        ),
+        CheckConstraint(
+            "source_kind IN ('real', 'synthetic', 'heuristic', 'mixed', "
+            "'development_fixture')",
+            name="ck_merchant_complaints_source",
+        ),
+    )
+
+
+class MarketTrendingDish(Base):
+    __tablename__ = "market_trending_dishes"
+
+    city_slug = Column(String, primary_key=True)
+    cuisine = Column(String, primary_key=True)
+    dish_name = Column(Text, primary_key=True)
+    trend_score = Column(Numeric, nullable=False)
+    rank = Column(Integer, nullable=False)
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=sa_text("CURRENT_TIMESTAMP"))
+
+    __table_args__ = (
+        CheckConstraint("rank > 0", name="ck_market_trending_dishes_rank"),
+    )
 
 class UserProfile(Base):
     __tablename__ = "user_profiles"
@@ -131,6 +447,9 @@ class ChatSession(Base):
     session_id = Column(String, primary_key=True)
     user_id = Column(String, ForeignKey("user_profiles.user_id", ondelete="SET NULL"))
     title = Column(String)
+    # §6.2 extension: durable recovery snapshot (Redis stays hot copy)
+    context_snapshot_json = Column(JSONB)
+    last_trace_id = Column(String)
     created_at = Column(TIMESTAMP(timezone=False), server_default=sa_text("CURRENT_TIMESTAMP"))
     updated_at = Column(TIMESTAMP(timezone=False), server_default=sa_text("CURRENT_TIMESTAMP"))
     
@@ -144,6 +463,97 @@ class ChatMessage(Base):
     session_id = Column(String, ForeignKey("chat_sessions.session_id", ondelete="CASCADE"), nullable=False)
     sender = Column(String, CheckConstraint("sender IN ('user', 'agent')"))
     text = Column(String, nullable=False)
+    # §6.2 extension: connect visible messages to results and traces
+    trace_id = Column(String)
+    structured_payload_json = Column(JSONB)
     timestamp = Column(TIMESTAMP(timezone=False), server_default=sa_text("CURRENT_TIMESTAMP"))
-    
+
     session = relationship("ChatSession", back_populates="chat_messages")
+
+
+# ---------------------------------------------------------------------------
+# §6.2 runtime records added before agent integration (Phase 0 — FROZEN)
+# ---------------------------------------------------------------------------
+class PreferenceEvent(Base):
+    """Append-only preference audit (§6.6). Never replaces user_profiles."""
+    __tablename__ = "preference_events"
+
+    event_id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("user_profiles.user_id", ondelete="CASCADE"), nullable=False)
+    session_id = Column(String)
+    field = Column(String, nullable=False)
+    operation = Column(String, nullable=False)
+    value_json = Column(JSONB)
+    scope = Column(String, nullable=False)
+    source = Column(String, nullable=False)
+    confidence = Column(Float, default=1.0)
+    status = Column(String, default="candidate")
+    evidence_refs_json = Column(JSONB)
+    expires_at = Column(TIMESTAMP(timezone=False))
+    created_at = Column(TIMESTAMP(timezone=False), server_default=sa_text("CURRENT_TIMESTAMP"))
+    resolved_at = Column(TIMESTAMP(timezone=False))
+
+
+class InteractionEvent(Base):
+    """Append-only UI/chat signal (§11.7). Evidence only — cannot mutate profiles."""
+    __tablename__ = "interaction_events"
+
+    event_id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("user_profiles.user_id", ondelete="CASCADE"), nullable=False)
+    session_id = Column(String)
+    event_type = Column(String, nullable=False)
+    merchant_id = Column(String)
+    menu_item_id = Column(String)
+    metadata_json = Column(JSONB)
+    created_at = Column(TIMESTAMP(timezone=False), server_default=sa_text("CURRENT_TIMESTAMP"))
+
+
+
+
+class PolicyDocument(Base):
+    """One authoritative policy document; vectors live in PGVectorStore/Chroma."""
+
+    __tablename__ = "policy_documents"
+
+    document_id = Column(String, primary_key=True)
+    title = Column(String, nullable=False)
+    source_url = Column(String, nullable=False, unique=True)
+    category = Column(String, nullable=False, index=True)
+    document_text = Column(Text, nullable=False, server_default="")
+    policy_updated_at = Column(TIMESTAMP(timezone=True))
+    content_hash = Column(String, nullable=False)
+    created_at = Column(
+        TIMESTAMP(timezone=True), server_default=sa_text("CURRENT_TIMESTAMP")
+    )
+
+
+class PolicyDocumentChunk(Base):
+    """A structure-aware policy chunk and its minimal retrieval metadata."""
+
+    __tablename__ = "policy_document_chunks"
+    __table_args__ = (
+        Index(
+            "uq_policy_document_chunks_document_index",
+            "document_id",
+            "chunk_index",
+            unique=True,
+        ),
+    )
+
+    chunk_id = Column(String, primary_key=True)
+    document_id = Column(
+        String,
+        ForeignKey("policy_documents.document_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    content = Column(Text, nullable=False)
+    section_path = Column(JSONB, nullable=False, default=list)
+    section_title = Column(String, nullable=True)
+    section_level = Column(Integer, nullable=True)
+    token_count = Column(Integer, nullable=False, server_default="0")
+    chunk_index = Column(Integer, nullable=False)
+    content_hash = Column(String, nullable=False)
+    created_at = Column(
+        TIMESTAMP(timezone=True), server_default=sa_text("CURRENT_TIMESTAMP")
+    )
