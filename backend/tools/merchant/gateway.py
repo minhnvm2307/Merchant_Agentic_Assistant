@@ -498,11 +498,8 @@ class RunScopedMerchantToolGateway:
     def tools_for(self, agent_name: str) -> list[BaseTool]:
         market_tools: list[BaseTool] = [
             GatewaySearchMerchantsTool(gateway=self, agent_name=agent_name),
+            GatewayPublicMerchantDetailTool(gateway=self, agent_name=agent_name),
         ]
-        if self._known_public_merchant_ids:
-            market_tools.append(
-                GatewayPublicMerchantDetailTool(gateway=self, agent_name=agent_name)
-            )
         tools: dict[str, list[BaseTool]] = {
             "market_search": market_tools,
             "market": market_tools,
